@@ -19,6 +19,8 @@ from datetime import datetime, date, timedelta
 
 # Import standardization backend and helpers
 from standardize import robust_standardize_excel, extract_year_range
+# Import Savi processing functions
+from savi_process import clean_and_pivot_savi, compute_circles_of_power, precompute_and_save_savi_data
 
 # Page configuration
 st.set_page_config(
@@ -28,7 +30,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-def compute_turnover_metrics(df, selected_roles, start_mandate, end_mandate, column_name='nome'):
+def compute_turnover_metrics(df, selected_roles, start_mandate, end_mandate, step_size=1, column_name='nome'):
     """
     Computes turnover metrics for a given set of roles and window of mandates.
     """
@@ -57,27 +59,28 @@ def compute_turnover_metrics(df, selected_roles, start_mandate, end_mandate, col
     
     df_councils = df[['numero mandato', 'anno', 'mesi']].dropna(subset=['anno', 'mesi']).drop_duplicates().sort_values(by='numero mandato')
     
-    for i in range(len(active_mandates) - 1):
-        m_curr = active_mandates[i]
-        m_next = active_mandates[i+1]
-        members_curr = set(df_role_filtered[df_role_filtered['numero mandato'] == m_curr][column_name].dropna().unique())
-        members_next = set(df_role_filtered[df_role_filtered['numero mandato'] == m_next][column_name].dropna().unique())
-        if members_curr and members_next:
-            new_members = members_next - members_curr
-            turnval = len(new_members) / len(members_next)
-            turnovers.append(turnval)
-            
-            m_next_rows = df_councils[df_councils['numero mandato'] == m_next]
-            if not m_next_rows.empty:
-                m_next_row = m_next_rows.iloc[0]
-                m_next_label = f"{m_next}. {m_next_row['anno']} ({m_next_row['mesi']})"
-            else:
-                m_next_label = f"Mandato {m_next}"
+    for i in range(len(active_mandates)):
+        if i + step_size < len(active_mandates):
+            m_curr = active_mandates[i]
+            m_next = active_mandates[i + step_size]
+            members_curr = set(df_role_filtered[df_role_filtered['numero mandato'] == m_curr][column_name].dropna().unique())
+            members_next = set(df_role_filtered[df_role_filtered['numero mandato'] == m_next][column_name].dropna().unique())
+            if members_curr and members_next:
+                new_members = members_next - members_curr
+                turnval = len(new_members) / len(members_next)
+                turnovers.append(turnval)
                 
-            turnover_chart_data.append({
-                'Consiglio': m_next_label,
-                'Ricambio (%)': turnval * 100
-            })
+                m_next_rows = df_councils[df_councils['numero mandato'] == m_next]
+                if not m_next_rows.empty:
+                    m_next_row = m_next_rows.iloc[0]
+                    m_next_label = f"{m_next}. {m_next_row['anno']} ({m_next_row['mesi']})"
+                else:
+                    m_next_label = f"Mandato {m_next}"
+                    
+                turnover_chart_data.append({
+                    'Consiglio': m_next_label,
+                    'Ricambio (%)': turnval * 100
+                })
             
     avg_turnover = np.mean(turnovers) * 100 if turnovers else 0.0
     
@@ -147,7 +150,7 @@ st.markdown("""
         margin-bottom: 1.5rem;
     }
     
-    .stButton>button {
+    .stButton>button, .stDownloadButton>button {
         background: linear-gradient(135deg, #334155, #475569);
         color: white;
         border-radius: 6px;
@@ -158,7 +161,7 @@ st.markdown("""
         transition: all 0.2s ease;
     }
     
-    .stButton>button:hover {
+    .stButton>button:hover, .stDownloadButton>button:hover {
         background: linear-gradient(135deg, #1e293b, #334155);
         box-shadow: 0 2px 8px rgba(30, 41, 59, 0.25);
     }
@@ -374,6 +377,518 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def generate_markdown_report(start_yr, end_yr, filtered_time_df, active_page_or_tab):
+    import pandas as pd
+    import os
+    
+    if active_page_or_tab == 'Famiglie e Individui':
+        # 1. Top Families Table
+        fam_counts = filtered_time_df['Famiglia'].value_counts().dropna()
+        top_fam_df = pd.DataFrame({
+            'Posizione': range(1, len(fam_counts.head(20)) + 1),
+            'Famiglia': fam_counts.head(20).index,
+            'Occorrenze (Cariche)': fam_counts.head(20).values,
+            'Percentuale su Totale (%)': (fam_counts.head(20).values / len(filtered_time_df) * 100).round(2) if len(filtered_time_df) > 0 else 0
+        })
+        top_fam_md = top_fam_df.to_markdown(index=False) if not top_fam_df.empty else "Nessun dato."
+        
+        # 2. Top Individuals Table
+        ind_counts = filtered_time_df['nome'].value_counts().dropna()
+        ind_details = []
+        for pos, (name, count) in enumerate(ind_counts.head(20).items(), 1):
+            sub_df = filtered_time_df[filtered_time_df['nome'] == name]
+            fam = sub_df['Famiglia'].iloc[0] if not sub_df.empty and 'Famiglia' in sub_df.columns else ''
+            ind_details.append({
+                'Posizione': pos,
+                'Nome': name,
+                'Famiglia': fam,
+                'Presenze nel Consiglio': count
+            })
+        top_ind_df = pd.DataFrame(ind_details)
+        top_ind_md = top_ind_df.to_markdown(index=False) if ind_details else "Nessun dato."
+        
+        report_content = f"""# Pisa Medieval Politician Database - Report Famiglie e Individui
+
+**Periodo di Analisi selezionato:** {start_yr} - {end_yr}
+
+Questo report raccoglie le tabelle delle famiglie e degli individui più attivi nel consiglio nel periodo selezionato.
+
+---
+
+### 1. Egemonia Familiare (Top 20 Famiglie per Occorrenze)
+{top_fam_md}
+
+### 2. Rappresentazione degli Individui (Top 20 Politici per Occorrenze)
+{top_ind_md}
+"""
+        return report_content
+
+    elif active_page_or_tab == 'Categorie Professionali':
+        prof_counts = filtered_time_df['Professione'].value_counts().dropna()
+        top_prof_df = pd.DataFrame({
+            'Posizione': range(1, len(prof_counts.head(20)) + 1),
+            'Professione': prof_counts.head(20).index,
+            'Occorrenze (Cariche)': prof_counts.head(20).values,
+            'Percentuale su Totale (%)': (prof_counts.head(20).values / len(filtered_time_df) * 100).round(2) if len(filtered_time_df) > 0 else 0
+        })
+        top_prof_md = top_prof_df.to_markdown(index=False) if not top_prof_df.empty else "Nessun dato."
+        
+        report_content = f"""# Pisa Medieval Politician Database - Report Categorie Professionali
+
+**Periodo di Analisi selezionato:** {start_yr} - {end_yr}
+
+Questo report raccoglie le tabelle di rappresentazione professionale nel consiglio nel periodo selezionato.
+
+---
+
+### 1. Distribuzione delle Professioni (Top 20 Categorie)
+{top_prof_md}
+"""
+        return report_content
+
+    elif active_page_or_tab == 'Distribuzione Cariche':
+        role_counts = filtered_time_df['ruolo'].value_counts().dropna()
+        roles_df = pd.DataFrame({
+            'Ruolo': role_counts.index,
+            'Occorrenze (Cariche)': role_counts.values,
+            'Percentuale su Totale (%)': (role_counts.values / len(filtered_time_df) * 100).round(2) if len(filtered_time_df) > 0 else 0
+        })
+        roles_md = roles_df.to_markdown(index=False) if not roles_df.empty else "Nessun dato."
+        
+        report_content = f"""# Pisa Medieval Politician Database - Report Distribuzione Cariche
+
+**Periodo di Analisi selezionato:** {start_yr} - {end_yr}
+
+Questo report raccoglie le tabelle relative alla distribuzione delle cariche e dei ruoli nel consiglio per il periodo selezionato.
+
+---
+
+### 1. Frequenza dei Ruoli
+{roles_md}
+"""
+        return report_content
+
+    elif active_page_or_tab == 'Ricambio nel Tempo':
+        analysis_unit = st.session_state.get("turnover_analysis_unit", "Individui (singoli politici)")
+        cb_anz1 = st.session_state.get("cb_turnover_anz1", True)
+        cb_anz2 = st.session_state.get("cb_turnover_anz2", True)
+        cb_priore = st.session_state.get("cb_turnover_priore", False)
+        cb_notaio = st.session_state.get("cb_turnover_notaio", False)
+        cb_canc = st.session_state.get("cb_turnover_canc", False)
+        selected_step_label = st.session_state.get("turnover_step_slider", "6 mesi (3 consigli)")
+        block_size = st.session_state.get("turnover_cohort_block_size", 5)
+
+        unit_mapping = {
+            "Individui (singoli politici)": "nome",
+            "Famiglie (cognomi/casate)": "Famiglia",
+            "Quartieri (provenienza geografica)": "quartiere"
+        }
+        column_name = unit_mapping.get(analysis_unit, "nome")
+        
+        unit_names_pl = {
+            "nome": {
+                "singular": "politico",
+                "plural": "politici",
+                "capital_plural": "Politici",
+                "agreement_noun": "persone",
+                "agreement_adj": "nuove"
+            },
+            "Famiglia": {
+                "singular": "famiglia",
+                "plural": "famiglie",
+                "capital_plural": "Famiglie",
+                "agreement_noun": "famiglie",
+                "agreement_adj": "nuove"
+            },
+            "quartiere": {
+                "singular": "quartiere",
+                "plural": "quartieri",
+                "capital_plural": "Quartieri",
+                "agreement_noun": "quartieri",
+                "agreement_adj": "nuovi"
+            }
+        }
+        u_info = unit_names_pl.get(column_name, unit_names_pl["nome"])
+
+        selected_roles = []
+        if cb_anz1: selected_roles.append("anziano #1")
+        if cb_anz2: selected_roles.append("anziano #2")
+        if cb_priore: selected_roles.append("priore")
+        if cb_notaio: selected_roles.append("notaio anziani")
+        if cb_canc: selected_roles.append("canc. maior")
+        
+        roles_str = ", ".join([r.capitalize() for r in selected_roles]) if selected_roles else "Nessuno"
+        
+        df = st.session_state.get('standardized_df')
+        if df is None or df.empty:
+            return "# Pisa Medieval Politician Database\n\nErrore: Database non disponibile."
+            
+        active_mandates_filtered = []
+        if not filtered_time_df.empty:
+            active_mandates_filtered = sorted(filtered_time_df['numero mandato'].dropna().unique())
+            
+        if active_mandates_filtered:
+            start_mandate = int(active_mandates_filtered[0])
+            end_mandate = int(active_mandates_filtered[-1])
+        else:
+            start_mandate = 1
+            end_mandate = 1
+
+        df_councils = df[['numero mandato', 'anno', 'mesi']].dropna(subset=['anno', 'mesi']).drop_duplicates().sort_values(by='numero mandato')
+        def get_council_label(m_num):
+            rows = df_councils[df_councils['numero mandato'] == m_num]
+            if not rows.empty:
+                r = rows.iloc[0]
+                return f"{m_num}. {r['anno']} ({r['mesi']})"
+            return f"Mandato {m_num}"
+
+        start_council_lbl = get_council_label(start_mandate)
+        end_council_lbl = get_council_label(end_mandate)
+
+        # 1. Confronto Rolling
+        option_to_step = {
+            "6 mesi (3 consigli)": 3,
+            "1 anno (6 consigli)": 6,
+            "2 anni (12 consigli)": 12,
+            "3 anni (18 consigli)": 18,
+            "4 anni (24 consigli)": 24,
+            "5 anni (30 consigli)": 30,
+            "6 anni (36 consigli)": 36,
+            "7 anni (42 consigli)": 42,
+            "8 anni (48 consigli)": 48,
+            "9 anni (54 consigli)": 54,
+            "10 anni (60 consigli)": 60,
+            "15 anni (90 consigli)": 90,
+            "20 anni (120 consigli)": 120,
+            "25 anni (150 consigli)": 150,
+            "30 anni (180 consigli)": 180
+        }
+        step_size = option_to_step.get(selected_step_label, 3)
+        
+        metrics = compute_turnover_metrics(df, selected_roles, start_mandate, end_mandate, step_size=step_size, column_name=column_name)
+        
+        rolling_md = ""
+        if metrics is None:
+            rolling_md = "Nessun dato trovato per i ruoli e periodo selezionati nel confronto rolling."
+        else:
+            avg_turnover = metrics['avg_turnover']
+            avg_steps = metrics['avg_steps']
+            pct_overlap_start = metrics['pct_overlap_start']
+            shared_members = metrics['shared_members']
+            start_members = metrics['start_members']
+            end_members = metrics['end_members']
+            top_members = metrics['top_members']
+            
+            if avg_steps is not None:
+                avg_months = avg_steps * 2
+                complete_turnover_str = f"{avg_steps:.1f} Consigli (~{avg_months:.1f} Mesi)"
+            else:
+                complete_turnover_str = "Non raggiungibile nel periodo"
+                
+            start_lbls = ", ".join(sorted(list(start_members))) if start_members else "Nessuno"
+            end_lbls = ", ".join(sorted(list(end_members))) if end_members else "Nessuno"
+            shared_lbls = ", ".join(sorted(list(shared_members))) if shared_members else "Nessuno"
+            
+            df_top_members = pd.DataFrame({
+                'Soggetto': top_members.index,
+                'Partecipazioni (mandati)': top_members.values
+            }).head(20)
+            top_members_md = df_top_members.to_markdown(index=False) if not df_top_members.empty else "Nessun dato."
+            
+            rolling_md = f"""#### Metriche Generali (Confronto Rolling)
+- **Tasso di Ricambio Medio**: {avg_turnover:.1f}% (Intervallo: {selected_step_label})
+- **Tempo Stimato per Ricambio Completo**: {complete_turnover_str}
+- **Tasso di Sovrapposizione Inizio-Fine**: {pct_overlap_start:.1f}%
+
+#### Dettaglio Sovrapposizione Estremi (Inizio vs Fine)
+- **Soggetti presenti all'inizio ({start_council_lbl})**: {start_lbls}
+- **Soggetti presenti alla fine ({end_council_lbl})**: {end_lbls}
+- **Soggetti condivisi (In comune)**: {shared_lbls}
+
+#### Top 20 {u_info['capital_plural']} per Partecipazioni nel Periodo
+{top_members_md}"""
+
+        # 2. Confronto per Finestre (Coorti)
+        blocks = []
+        curr_yr = start_yr
+        while curr_yr <= end_yr:
+            next_yr = min(curr_yr + block_size - 1, end_yr)
+            blocks.append((curr_yr, next_yr))
+            curr_yr += block_size
+            
+        cohort_turnovers = []
+        cohort_chart_data = []
+        block_members = {}
+        for b_start, b_end in blocks:
+            b_df = filtered_time_df[
+                (filtered_time_df['start_year'] >= b_start) & 
+                (filtered_time_df['start_year'] <= b_end) &
+                (filtered_time_df['ruolo'].isin(selected_roles))
+            ]
+            members = set(b_df[column_name].dropna().unique())
+            block_members[(b_start, b_end)] = members
+            
+        for i in range(len(blocks) - 1):
+            b1 = blocks[i]
+            b2 = blocks[i+1]
+            m1 = block_members[b1]
+            m2 = block_members[b2]
+            if m1 and m2:
+                new_m = m2 - m1
+                turnval = (len(new_m) / len(m2)) * 100
+                cohort_turnovers.append(turnval)
+                label = f"{b1[0]}-{b1[1]} vs {b2[0]}-{b2[1]}"
+                cohort_chart_data.append({
+                    'Finestre a Confronto': label,
+                    'Ricambio (%)': round(turnval, 2)
+                })
+                
+        if cohort_chart_data:
+            df_cohort_c = pd.DataFrame(cohort_chart_data)
+            avg_cohort_t = np.mean(cohort_turnovers)
+            cohort_table_md = df_cohort_c.to_markdown(index=False)
+            cohort_md = f"""- **Ricambio Medio tra Coorti**: {avg_cohort_t:.1f}% (Finestre di {block_size} anni)
+
+#### Tabella Confronto Coorti:
+{cohort_table_md}"""
+        else:
+            cohort_md = f"Periodo troppo breve per creare almeno due finestre temporali da {block_size} anni ciascuna."
+
+        # 3. Analisi di Ricorrenza (Carriere)
+        df_rec = filtered_time_df[filtered_time_df['ruolo'].isin(selected_roles)].copy()
+        service_counts = df_rec[column_name].value_counts().dropna()
+        
+        if not service_counts.empty:
+            total_unique = len(service_counts)
+            more_than_once = (service_counts > 1).sum()
+            rec_rate = (more_than_once / total_unique) * 100
+            
+            bins = [0, 1, 2, 4, 100]
+            labels_bins = ["1 sola volta", "2 volte", "3-4 volte", "5+ volte"]
+            categorized = pd.cut(service_counts, bins=bins, labels=labels_bins).value_counts().reindex(labels_bins)
+            categorized.index.name = 'Frequenza di ritorno'
+            df_cat = categorized.reset_index(name='Numero di soggetti')
+            df_cat_md = df_cat.to_markdown(index=False)
+            
+            top_n_rec = 20
+            top_recurrent = service_counts.head(top_n_rec)
+            df_top_rec = pd.DataFrame({
+                'Soggetto': top_recurrent.index,
+                'Numero di Mandati': top_recurrent.values
+            })
+            df_top_rec_md = df_top_rec.to_markdown(index=False)
+            
+            recurrence_md = f"""- **Tasso di Ricorrenza (Ritorno al potere)**: {rec_rate:.1f}% (Percentuale di soggetti con più di un mandato nel periodo)
+
+#### Frequenza di Ritorno delle Carriere:
+{df_cat_md}
+
+#### Dettaglio dei Soggetti più Ricorrenti (Top {top_n_rec}):
+{df_top_rec_md}"""
+        else:
+            recurrence_md = "Nessun dato di ricorrenza disponibile per il periodo e ruoli selezionati."
+
+        # 4. Indice di Concentrazione (Oligarchia)
+        if not service_counts.empty:
+            counts = service_counts.values
+            counts_sorted = sorted(counts, reverse=True)
+            
+            def gini_coef(array):
+                if len(array) == 0 or np.sum(array) == 0:
+                    return 0.0
+                array = np.array(array, dtype=np.float64)
+                array = np.sort(array)
+                index = np.arange(1, array.shape[0] + 1)
+                n = array.shape[0]
+                return ((2 * index - n - 1) * array).sum() / (n * array.sum())
+                
+            gini_v = gini_coef(counts)
+            
+            total_seats = sum(counts_sorted)
+            cum_seats = np.cumsum(counts_sorted)
+            cum_percent_seats = (cum_seats / total_seats) * 100
+            
+            top_10_pct_count = max(1, int(len(counts_sorted) * 0.1))
+            top_10_pct_share = cum_percent_seats[top_10_pct_count - 1]
+            
+            concentration_md = f"""- **Indice di Gini**: {gini_v:.4f} *(0 = perfetta uguaglianza/rotazione, 1 = massima concentrazione)*
+- **Quota del 10% dei soggetti più attivi**: {top_10_pct_share:.1f}% delle cariche totali nel periodo"""
+        else:
+            concentration_md = "Nessun dato di concentrazione disponibile."
+
+        report_content = f"""# Pisa Medieval Politician Database - Report Ricambio nel Tempo
+        
+**Periodo di Analisi selezionato:** {start_yr} - {end_yr}
+**Unità di Analisi:** {analysis_unit}
+**Ruoli Analizzati:** {roles_str}
+
+---
+
+### 1. Confronto Rolling (Consiglio vs Consiglio)
+{rolling_md}
+
+---
+
+### 2. Confronto per Finestre Temporali (Coorti)
+{cohort_md}
+
+---
+
+### 3. Analisi di Ricorrenza (Carriere)
+{recurrence_md}
+
+---
+
+### 4. Concentrazione del Potere (Oligarchia)
+{concentration_md}
+"""
+        return report_content
+
+    elif active_page_or_tab == 'Classifiche Personalizzate':
+        fam_counts = filtered_time_df['Famiglia'].value_counts().dropna().head(20)
+        top_fam_df = pd.DataFrame({
+            'Posizione': range(1, len(fam_counts) + 1),
+            'Famiglia': fam_counts.index,
+            'Frequenza (Occorrenze)': fam_counts.values
+        })
+        top_fam_md = top_fam_df.to_markdown(index=False)
+
+        prof_counts = filtered_time_df['Professione'].value_counts().dropna().head(20)
+        top_prof_df = pd.DataFrame({
+            'Posizione': range(1, len(prof_counts) + 1),
+            'Professione': prof_counts.index,
+            'Frequenza (Occorrenze)': prof_counts.values
+        })
+        top_prof_md = top_prof_df.to_markdown(index=False)
+
+        q_counts = filtered_time_df['quartiere'].value_counts().dropna()
+        q_df = pd.DataFrame({
+            'Posizione': range(1, len(q_counts) + 1),
+            'Quartiere': [str(x).strip().capitalize() for x in q_counts.index],
+            'Frequenza (Occorrenze)': q_counts.values
+        })
+        q_md = q_df.to_markdown(index=False)
+
+        report_content = f"""# Pisa Medieval Politician Database - Report Classifiche e Graduatorie
+
+**Periodo di Analisi selezionato:** {start_yr} - {end_yr}
+
+Questo report raccoglie le graduatorie di frequenza complete per Famiglie, Professioni e Quartieri relative al periodo selezionato.
+
+---
+
+### 1. Classifica delle Famiglie (Top 20)
+{top_fam_md}
+
+### 2. Classifica delle Professioni (Top 20)
+{top_prof_md}
+
+### 3. Classifica dei Quartieri
+{q_md}
+"""
+        return report_content
+
+    elif active_page_or_tab == 'savi':
+        savi_excel = os.path.join("data", "Lista di Savi e Cerchi di potere.xlsx")
+        if os.path.exists(savi_excel):
+            try:
+                from savi_process import clean_and_pivot_savi, compute_circles_of_power
+                df_savi_raw = clean_and_pivot_savi(savi_excel)
+                circles_data = compute_circles_of_power(df_savi_raw, filtered_time_df)
+                
+                c0 = circles_data['cerchio_0']
+                c1 = circles_data['cerchio_1']
+                c2 = circles_data['cerchio_2']
+                c3 = circles_data['cerchio_3']
+                c4 = circles_data['cerchio_4']
+                
+                df_savi_std = circles_data['df_savi']
+                df_anziani_unici = circles_data['df_anziani_unici']
+                
+                def get_family_counts_md(names, source_df):
+                    df_sub = source_df[source_df['nome'].isin(names)].copy()
+                    counts = df_sub.drop_duplicates(subset=['nome'])['famiglia'].value_counts().reset_index()
+                    counts.columns = ['Famiglia', 'Numero Individui']
+                    return counts.head(10).to_markdown(index=False) if not counts.empty else "Nessun dato."
+                    
+                c0_fam_md = get_family_counts_md(c0, df_savi_std)
+                c2_fam_md = get_family_counts_md(c2, df_anziani_unici)
+                c3_fam_md = get_family_counts_md(c3, df_anziani_unici)
+                c4_fam_md = get_family_counts_md(c4, df_anziani_unici)
+                
+                def get_members_list_md(names, source_df, is_noble_source=False):
+                    df_sub = source_df[source_df['nome'].isin(names)].copy().drop_duplicates(subset=['nome'])
+                    cols = ['nome', 'famiglia', 'quartiere']
+                    if is_noble_source and 'Nobile' in df_sub.columns:
+                        cols.append('Nobile')
+                    if df_sub.empty:
+                        return "Nessun individuo registrato."
+                    df_sub = df_sub[cols].reset_index(drop=True)
+                    df_sub.columns = [c.capitalize() for c in cols]
+                    return df_sub.to_markdown(index=False)
+                    
+                c0_members_md = get_members_list_md(c0, df_savi_std, is_noble_source=True)
+                c1_members_md = get_members_list_md(c1, df_savi_std, is_noble_source=True)
+                c2_members_md = get_members_list_md(c2, df_anziani_unici)
+                c3_members_md = get_members_list_md(c3, df_anziani_unici)
+                c4_members_md = get_members_list_md(c4, df_anziani_unici)
+                
+                report_content = f"""# Pisa Medieval Politician Database - Report Consiglio dei Savi
+
+**Periodo degli Anziani di riferimento:** {start_yr} - {end_yr}
+
+Questo report raccoglie tutte le tabelle dei Cerchi di Potere per il Consiglio dei Savi relative all'intervallo temporale selezionato.
+
+---
+
+### 1. Sintesi delle Dimensioni dei Cerchi
+| Cerchio di Potere | Numero di Individui Unici |
+| --- | --- |
+| C0: Aristocrazia (Solo Savi) | {len(c0)} |
+| C1: Nobiltà Istituzionale (Entrambi) | {len(c1)} |
+| C2: Elite (Entrambi) | {len(c2)} |
+| C3: Rete Consorterie (Parenti C2) | {len(c3)} |
+| C4: Nuovi Attori (Esterni) | {len(c4)} |
+
+### 2. Top 10 Famiglie per Cerchio di Potere
+
+#### C0: Aristocrazia
+{c0_fam_md}
+
+#### C2: Elite
+{c2_fam_md}
+
+#### C3: Rete Consorterie
+{c3_fam_md}
+
+#### C4: Nuovi Attori
+{c4_fam_md}
+
+### 3. Elenco Completo dei Membri dei Cerchi di Potere
+
+#### C0: Aristocrazia (Solo Savi)
+{c0_members_md}
+
+#### C1: Nobiltà Istituzionale (Entrambi)
+{c1_members_md}
+
+#### C2: Elite (Entrambi)
+{c2_members_md}
+
+#### C3: Rete Consorterie (Parenti C2)
+{c3_members_md}
+
+#### C4: Nuovi Attori (Esterni)
+{c4_members_md}
+"""
+                return report_content
+            except Exception as ex:
+                return f"# Pisa Medieval Politician Database - Report Consiglio dei Savi\n\n*Errore durante il calcolo dei Cerchi di Potere: {ex}*"
+        else:
+            return "# Pisa Medieval Politician Database - Report Consiglio dei Savi\n\n*Dati del Consiglio dei Savi non caricati.*"
+    return ""
+
+
 # App Header
 st.markdown('<div class="main-title">Anziani del Comune di Pisa</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Database delle Cariche Politiche Medievali (1344-1392) • Standardizzazione & Analytics</div>', unsafe_allow_html=True)
@@ -388,38 +903,86 @@ if 'standardized_df' not in st.session_state:
 if 'sheet_used' not in st.session_state:
     st.session_state['sheet_used'] = None
 
+import os
+DEFAULT_EXCEL_PATH = os.path.join("data", "Anziani del Comune di Pisa 1344-1392.xlsx")
+
+# Automatically load the default excel file if it exists and session is empty
+if st.session_state['standardized_df'] is None:
+    csv_target = os.path.join("data", "total_df.csv")
+    
+    # 1. Fallback: Try loading from the CSV first if it exists
+    if os.path.exists(csv_target):
+        try:
+            std_df = pd.read_csv(csv_target)
+            # Convert date columns back to datetime.date objects to prevent TypeError
+            from datetime import date
+            for col in ['data inizio mandato', 'data fine mandato']:
+                if col in std_df.columns:
+                    std_df[col] = std_df[col].apply(
+                        lambda x: date(*map(int, str(x).strip().split('-'))) if (isinstance(x, str) and len(str(x).strip().split('-')) == 3) else None
+                    )
+            st.session_state['standardized_df'] = std_df
+            st.session_state['raw_file_name'] = "total_df.csv"
+            st.session_state['sheet_used'] = "CSV pre-elaborato"
+        except Exception as ex:
+            st.warning(f"Errore nel caricamento del CSV pre-elaborato: {ex}")
+            
+    # 2. Excel standard path loading (if CSV was missing or failed)
+    if st.session_state['standardized_df'] is None:
+        if os.path.exists(DEFAULT_EXCEL_PATH):
+            try:
+                from standardize import find_data_sheet
+                std_df = robust_standardize_excel(DEFAULT_EXCEL_PATH)
+                st.session_state['standardized_df'] = std_df
+                st.session_state['raw_file_name'] = os.path.basename(DEFAULT_EXCEL_PATH)
+                xls_file = pd.ExcelFile(DEFAULT_EXCEL_PATH)
+                st.session_state['sheet_used'] = find_data_sheet(xls_file)
+                # Auto-save to CSV
+                os.makedirs(os.path.dirname(csv_target), exist_ok=True)
+                std_df.to_csv(csv_target, index=False)
+            except Exception as ex:
+                st.error(f"Errore nel caricamento del file Excel predefinito ({DEFAULT_EXCEL_PATH}): {ex}")
+        else:
+            # 3. Fallback: Search for any backup/alternative excel files in the folder
+            import glob
+            excel_files = glob.glob(os.path.join("data", "Anziani del Comune di Pisa*.xlsx"))
+            if excel_files:
+                alternative_excel = excel_files[0]
+                try:
+                    from standardize import find_data_sheet
+                    std_df = robust_standardize_excel(alternative_excel)
+                    st.session_state['standardized_df'] = std_df
+                    st.session_state['raw_file_name'] = os.path.basename(alternative_excel)
+                    xls_file = pd.ExcelFile(alternative_excel)
+                    st.session_state['sheet_used'] = find_data_sheet(xls_file)
+                    # Auto-save to CSV
+                    std_df.to_csv(csv_target, index=False)
+                except Exception as ex:
+                    st.error(f"Errore nel caricamento del file Excel alternativo ({alternative_excel}): {ex}")
+            else:
+                st.error(f"Il database predefinito non è stato trovato in: {DEFAULT_EXCEL_PATH}. Carica un file nella pagina di Download per crearlo.")
+
+# Check and precompute Savi CSVs if missing on app startup
+csv_target = os.path.join("data", "total_df.csv")
+SAVI_EXCEL_PATH = os.path.join("data", "Lista di Savi e Cerchi di potere.xlsx")
+savi_std_csv = os.path.join("data", "savi_standardized.csv")
+savi_circ_csv = os.path.join("data", "savi_circles.csv")
+
+if os.path.exists(csv_target) and os.path.exists(SAVI_EXCEL_PATH):
+    if not os.path.exists(savi_std_csv) or not os.path.exists(savi_circ_csv):
+        try:
+            precompute_and_save_savi_data(SAVI_EXCEL_PATH, csv_target)
+        except Exception as ex:
+            st.warning(f"Errore nella pre-elaborazione dei dati dei Savi all'avvio: {ex}")
+
+
 # Show success toast exactly once after a successful upload/standardize run
 if st.session_state.get('just_uploaded', False):
     st.toast("File caricato e standardizzato con successo!")
     st.session_state['just_uploaded'] = False
-
-# File Uploader with fixed key to preserve state
-uploaded_file = st.file_uploader(
-    "Carica il file Excel dei Mandati (es. Anziani del Comune di Pisa 1344-1392.xlsx)",
-    type=["xlsx", "xls"],
-    help="Trascina qui il file Excel da analizzare.",
-    key="excel_file_uploader"
-)
-
-if uploaded_file is not None:
-    try:
-        # Check if file changed
-        if st.session_state['raw_file_name'] != uploaded_file.name:
-            st.session_state['raw_file_name'] = uploaded_file.name
-            with st.spinner("Standardizzazione del file in corso..."):
-                try:
-                    std_df = robust_standardize_excel(uploaded_file)
-                    st.session_state['standardized_df'] = std_df
-                    xls_file = pd.ExcelFile(uploaded_file)
-                    from standardize import find_data_sheet
-                    st.session_state['sheet_used'] = find_data_sheet(xls_file)
-                    st.session_state['just_uploaded'] = True
-                    st.rerun()
-                except Exception as ex:
-                    st.error(f"Errore nella standardizzazione: {ex}")
-                    st.session_state['standardized_df'] = None
-    except Exception as e:
-        st.error(f"Errore nel caricamento del file Excel: {e}")
+if st.session_state.get('just_uploaded_savi', False):
+    st.toast("File dei Savi caricato e Cerchi di Potere ricalcolati con successo!")
+    st.session_state['just_uploaded_savi'] = False
 
 # Processed Data Dashboard
 if st.session_state['standardized_df'] is not None:
@@ -442,50 +1005,6 @@ if st.session_state['standardized_df'] is not None:
     df = df.rename(columns={'nota': 'Famiglia', 'altra nota': 'Professione'})
     analysis_df = df.copy() # Simply analyze everything
 
-    # Precompute global socio-professional metrics for both Dashboard and Download pages
-    total_entries = len(analysis_df)
-    identified_prof_count = analysis_df['Professione'].dropna().count()
-    pct_identified = (identified_prof_count / total_entries) * 100 if total_entries > 0 else 0
-    
-    # Define top 10 overall professions first
-    profession_counts = analysis_df['Professione'].value_counts().dropna()
-    top_10_p_names = profession_counts.head(10).index.tolist()
-    
-    priori_df = df[df['ruolo'] == 'priore']
-    total_priori = len(priori_df)
-    priori_identified = priori_df['Professione'].dropna().count()
-    priori_top = priori_df[priori_df['Professione'].isin(top_10_p_names)]['Professione'].value_counts().dropna().head(3) if priori_identified > 0 else pd.Series()
-    
-    anz1_df = df[df['ruolo'] == 'anziano #1']
-    total_anz1 = len(anz1_df)
-    anz1_identified = anz1_df['Professione'].dropna().count()
-    anz1_top = anz1_df[anz1_df['Professione'].isin(top_10_p_names)]['Professione'].value_counts().dropna().head(3) if anz1_identified > 0 else pd.Series()
-    
-    anz2_df = df[df['ruolo'] == 'anziano #2']
-    total_anz2 = len(anz2_df)
-    anz2_identified = anz2_df['Professione'].dropna().count()
-    anz2_top = anz2_df[anz2_df['Professione'].isin(top_10_p_names)]['Professione'].value_counts().dropna().head(3) if anz2_identified > 0 else pd.Series()
-    
-    # Main Metrics Grid
-    col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
-    
-    total_records = len(df)
-    unique_names = df['nome'].dropna().nunique()
-    unique_families = df['Famiglia'].dropna().nunique()
-    unique_professions = df['Professione'].dropna().nunique()
-    total_mandates = df['numero mandato'].max()
-    
-    with col_m1:
-        st.markdown(f'<div class="card"><div class="metric-value">{total_records}</div><div class="metric-label">Righe Totali</div></div>', unsafe_allow_html=True)
-    with col_m2:
-        st.markdown(f'<div class="card"><div class="metric-value">{total_mandates}</div><div class="metric-label">Mandati totali</div></div>', unsafe_allow_html=True)
-    with col_m3:
-        st.markdown(f'<div class="card"><div class="metric-value">{unique_names}</div><div class="metric-label">Politici Unici</div></div>', unsafe_allow_html=True)
-    with col_m4:
-        st.markdown(f'<div class="card"><div class="metric-value">{unique_families}</div><div class="metric-label">Famiglie Uniche</div></div>', unsafe_allow_html=True)
-    with col_m5:
-        st.markdown(f'<div class="card"><div class="metric-value">{unique_professions}</div><div class="metric-label">Professioni Uniche</div></div>', unsafe_allow_html=True)
-        
     # Extract years globally for filtering
     df_fam_time = analysis_df.copy()
     df_fam_time['start_year'] = df_fam_time['anno'].apply(lambda x: extract_year_range(x)[0])
@@ -507,228 +1026,339 @@ if st.session_state['standardized_df'] is not None:
         
     start_yr, end_yr = st.session_state['selected_year_range']
 
-    # Sidebar Navigation Section (dashboard vs download) using Clickable Buttons (containers) instead of radio/checkboxes
+    # Initialize separate tab slider keys to match selected_year_range
+    for k in ['selected_years_fam', 'selected_years_prof', 'selected_years_roles', 'selected_years_turnover', 'ranking_year_range_slider', 'selected_years_download']:
+        if k not in st.session_state or st.session_state.get('last_processed_file_sliders') != st.session_state['raw_file_name']:
+            st.session_state[k] = st.session_state['selected_year_range']
+    st.session_state['last_processed_file_sliders'] = st.session_state['raw_file_name']
+
+    def sync_years(source_key):
+        # Guard: source_key may have been garbage-collected by Streamlit
+        # when the widget was not rendered (e.g. after page navigation)
+        if source_key not in st.session_state:
+            return
+        val = st.session_state[source_key]
+        st.session_state['selected_year_range'] = val
+        for k in ['selected_years_fam', 'selected_years_prof', 'selected_years_roles', 'selected_years_turnover', 'ranking_year_range_slider', 'selected_years_download']:
+            if k in st.session_state:
+                st.session_state[k] = val
+
+    # Sidebar Navigation Section (dashboard vs download vs savi) using Clickable Buttons (containers) instead of radio/checkboxes
     if 'page_option' not in st.session_state:
         st.session_state['page_option'] = 'dashboard'
         
+    page_option = st.session_state['page_option']
     with st.sidebar:
         st.markdown('<div class="sidebar-title">Pisa Medieval Database</div>', unsafe_allow_html=True)
         is_dash = st.session_state['page_option'] == 'dashboard'
+        is_savi = st.session_state['page_option'] == 'savi'
         is_down = st.session_state['page_option'] == 'download'
         
-        if st.button("Dashboard", key="nav_dashboard", use_container_width=True, type="primary" if is_dash else "secondary"):
+        if st.button("Dashboard Anziani", key="nav_dashboard", width='stretch', type="primary" if is_dash else "secondary"):
             if st.session_state['page_option'] != 'dashboard':
                 st.session_state['page_option'] = 'dashboard'
                 st.rerun()
                 
-        if st.button("Download", key="nav_download", use_container_width=True, type="primary" if is_down else "secondary"):
+        if st.button("Consiglio dei Savi", key="nav_savi", width='stretch', type="primary" if is_savi else "secondary"):
+            if st.session_state['page_option'] != 'savi':
+                st.session_state['page_option'] = 'savi'
+                st.rerun()
+                
+        if st.button("Download", key="nav_download", width='stretch', type="primary" if is_down else "secondary"):
             if st.session_state['page_option'] != 'download':
                 st.session_state['page_option'] = 'download'
                 st.rerun()
-                
+
     page_option = st.session_state['page_option']
-        
-    # Global computations matching the slider range (so they are always available for both Dashboard and Download)
-    filtered_time_df = df_fam_time[(df_fam_time['start_year'] >= start_yr) & (df_fam_time['start_year'] <= end_yr)]
-    family_counts_filtered = filtered_time_df['Famiglia'].value_counts().dropna()
-    top_10_f_filtered = family_counts_filtered.head(10)
+
+    # Only run heavy Dashboard/Download precomputations when actually on those pages.
+    # The Savi page doesn't need any of these variables, so skip them entirely for speed.
+    if page_option == "savi":
+        # Provide defaults so any stale references don't crash
+        filtered_time_df = pd.DataFrame()
+        family_counts_filtered = pd.Series(dtype=int)
+        top_10_f_filtered = pd.Series(dtype=int)
+        fig_cumulative = None
+        cumulative_melted = None
+        fig_prof = None
+        prof_role_top10 = None
+        fig_roles = go.Figure()
+        role_distribution = pd.DataFrame()
+        all_families = []
+        selected_family = None
+        family_members_df = pd.DataFrame()
+        family_individuals = []
+        selected_individual = None
+        table_display = pd.DataFrame()
+        family_role_counts = pd.Series(dtype=int)
+        total_family_roles = 0
+        family_quartiere_counts = pd.Series(dtype=int)
+        total_family_q = 0
+        ind_df = pd.DataFrame()
+        fig_timeline = None
+        ind_prof_str = "Non identificata"
+        total_entries = 0
+        identified_prof_count = 0
+        pct_identified = 0
+        profession_counts = pd.Series(dtype=int)
+        top_10_p_names = []
+        priori_df = pd.DataFrame()
+        total_priori = 0
+        priori_identified = 0
+        priori_top = pd.Series()
+        anz1_df = pd.DataFrame()
+        total_anz1 = 0
+        anz1_identified = 0
+        anz1_top = pd.Series()
+        anz2_df = pd.DataFrame()
+        total_anz2 = 0
+        anz2_identified = 0
+        anz2_top = pd.Series()
+        total_records = 0
+        unique_names = 0
+        unique_families = 0
+        unique_professions = 0
+        total_mandates = 0
+    else:
+        # Global computations matching the slider range (so they are always available for both Dashboard and Download)
+        filtered_time_df = df_fam_time[(df_fam_time['start_year'] >= start_yr) & (df_fam_time['start_year'] <= end_yr)].copy()
+        family_counts_filtered = filtered_time_df['Famiglia'].value_counts().dropna()
+        top_10_f_filtered = family_counts_filtered.head(10)
+
+        # Precompute global socio-professional metrics for both Dashboard and Download pages based on filtered data
+        total_entries = len(filtered_time_df)
+        identified_prof_count = filtered_time_df['Professione'].dropna().count()
+        pct_identified = (identified_prof_count / total_entries) * 100 if total_entries > 0 else 0
     
-    fig_cumulative = None
-    cumulative_melted = None
-    if not top_10_f_filtered.empty:
-        top_10_f_names = top_10_f_filtered.index.tolist()
-        years_range = list(range(start_yr, end_yr + 1))
-        
-        df_top_f = filtered_time_df[filtered_time_df['Famiglia'].isin(top_10_f_names)]
-        occ_by_year = df_top_f.groupby(['start_year', 'Famiglia']).size().unstack(fill_value=0)
-        occ_by_year = occ_by_year.reindex(years_range, fill_value=0)
-        cumulative_counts = occ_by_year.cumsum()
-        
-        cumulative_counts = cumulative_counts.reset_index().rename(columns={'start_year': 'Anno'})
-        cumulative_melted = cumulative_counts.melt(id_vars='Anno', var_name='Famiglia', value_name='Conteggio Cumulativo')
-        
-        fig_cumulative = px.line(
-            cumulative_melted,
-            x='Anno',
-            y='Conteggio Cumulativo',
-            color='Famiglia',
-            title=f"Conteggio cumulativo delle occorrenze nel tempo ({start_yr}-{end_yr})",
-            color_discrete_sequence=px.colors.qualitative.Pastel
-        )
-        fig_cumulative.update_layout(
-            template="plotly_white",
-            legend_title="Famiglia",
-            xaxis_title="Anno",
-            yaxis_title="Conteggio Cumulativo"
-        )
-        
-    profession_counts = analysis_df['Professione'].value_counts().dropna()
-    top_10_p_names = profession_counts.head(10).index.tolist()
+        # Define top 10 overall professions first based on filtered data
+        profession_counts = filtered_time_df['Professione'].value_counts().dropna()
+        top_10_p_names = profession_counts.head(10).index.tolist()
     
-    fig_prof = None
-    prof_role_top10 = None
-    if top_10_p_names:
-        prof_role_counts = analysis_df.groupby(['Professione', 'ruolo']).size().unstack(fill_value=0)
-        prof_role_top10 = prof_role_counts.loc[top_10_p_names]
-        prof_role_top10_melted = prof_role_top10.reset_index().melt(
-            id_vars='Professione',
-            var_name='Ruolo',
-            value_name='Frequenza'
-        )
-        fig_prof = px.bar(
-            prof_role_top10_melted,
-            x='Professione',
-            y='Frequenza',
-            color='Ruolo',
-            title="Top 10 Categorie Professionali per Ruolo",
-            color_discrete_sequence=px.colors.qualitative.Pastel,
-            barmode='stack'
-        )
-        fig_prof.update_layout(
-            template="plotly_white",
-            legend_title="Ruolo",
-            xaxis={'categoryorder': 'array', 'categoryarray': top_10_p_names},
-            xaxis_title="Professione",
-            yaxis_title="Numero di Cariche"
-        )
+        priori_df = filtered_time_df[filtered_time_df['ruolo'] == 'priore']
+        total_priori = len(priori_df)
+        priori_identified = priori_df['Professione'].dropna().count()
+        priori_top = priori_df[priori_df['Professione'].isin(top_10_p_names)]['Professione'].value_counts().dropna().head(3) if priori_identified > 0 else pd.Series()
+    
+        anz1_df = filtered_time_df[filtered_time_df['ruolo'] == 'anziano #1']
+        total_anz1 = len(anz1_df)
+        anz1_identified = anz1_df['Professione'].dropna().count()
+        anz1_top = anz1_df[anz1_df['Professione'].isin(top_10_p_names)]['Professione'].value_counts().dropna().head(3) if anz1_identified > 0 else pd.Series()
+    
+        anz2_df = filtered_time_df[filtered_time_df['ruolo'] == 'anziano #2']
+        total_anz2 = len(anz2_df)
+        anz2_identified = anz2_df['Professione'].dropna().count()
+        anz2_top = anz2_df[anz2_df['Professione'].isin(top_10_p_names)]['Professione'].value_counts().dropna().head(3) if anz2_identified > 0 else pd.Series()
+    
+        # Main Metrics Grid based on filtered data
+        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+    
+        total_records = len(filtered_time_df)
+        unique_names = filtered_time_df['nome'].dropna().nunique()
+        unique_families = filtered_time_df['Famiglia'].dropna().nunique()
+        unique_professions = filtered_time_df['Professione'].dropna().nunique()
+        total_mandates = filtered_time_df['numero mandato'].dropna().nunique()
+    
+        fig_cumulative = None
+        cumulative_melted = None
+        if not top_10_f_filtered.empty:
+            top_10_f_names = top_10_f_filtered.index.tolist()
+            years_range = list(range(start_yr, end_yr + 1))
         
-    top_overall_families = df['Famiglia'].value_counts().dropna().head(10).index.tolist()
-    filtered_df_families = df[df['Famiglia'].isin(top_overall_families)]
-    role_distribution = filtered_df_families.groupby(['Famiglia', 'ruolo']).size().unstack(fill_value=0)
-    
-    fig_roles = go.Figure()
-    colors_map = px.colors.qualitative.Pastel
-    for idx, role in enumerate(role_distribution.columns):
-        fig_roles.add_trace(go.Bar(
-            name=role,
-            x=role_distribution.index,
-            y=role_distribution[role],
-            marker_color=colors_map[idx % len(colors_map)]
-        ))
-    fig_roles.update_layout(
-        barmode='stack',
-        title="Distribuzione dei Ruoli per le 10 Famiglie Principali",
-        xaxis_title="Famiglia",
-        yaxis_title="Numero di Cariche",
-        template="plotly_white",
-        legend_title="Ruolo"
-    )
-    
-    # Track selected family and individual in session_state to survive tab/navigation changes
-    all_families = sorted(df['Famiglia'].dropna().unique())
-    if 'persisted_family' not in st.session_state:
-        st.session_state['persisted_family'] = all_families[0] if all_families else None
-    
-    selected_family = st.session_state['persisted_family']
-    if selected_family not in all_families and all_families:
-        selected_family = all_families[0]
-        st.session_state['persisted_family'] = selected_family
+            df_top_f = filtered_time_df[filtered_time_df['Famiglia'].isin(top_10_f_names)]
+            occ_by_year = df_top_f.groupby(['start_year', 'Famiglia']).size().unstack(fill_value=0)
+            occ_by_year = occ_by_year.reindex(years_range, fill_value=0)
+            cumulative_counts = occ_by_year.cumsum()
         
-    family_members_df = df_fam_time[
-        (df_fam_time['Famiglia'] == selected_family) & 
-        (df_fam_time['start_year'] >= start_yr) & 
-        (df_fam_time['start_year'] <= end_yr)
-    ].dropna(subset=['nome'])
-    family_individuals = sorted(family_members_df['nome'].dropna().unique()) if not family_members_df.empty else []
-    
-    if 'persisted_individual' not in st.session_state:
-        st.session_state['persisted_individual'] = family_individuals[0] if family_individuals else None
+            cumulative_counts = cumulative_counts.reset_index().rename(columns={'start_year': 'Anno'})
+            cumulative_melted = cumulative_counts.melt(id_vars='Anno', var_name='Famiglia', value_name='Conteggio Cumulativo')
         
-    selected_individual = st.session_state['persisted_individual']
-    if selected_individual not in family_individuals and family_individuals:
-        selected_individual = family_individuals[0]
-        st.session_state['persisted_individual'] = selected_individual
-        
-    # Precompute Family and Individual timelines/KPIs
-    family_members_df = family_members_df.sort_values(by='data inizio mandato', ascending=True)
-    table_display = family_members_df[['nome', 'ruolo', 'quartiere', 'anno', 'mesi']].copy()
-    table_display.columns = ['Nome', 'Ruolo', 'Quartiere', 'Anno', 'Mesi']
-    
-    family_role_counts = family_members_df['ruolo'].value_counts()
-    total_family_roles = family_role_counts.sum()
-    
-    family_quartiere_counts = family_members_df['quartiere'].value_counts(dropna=True)
-    total_family_q = family_quartiere_counts.sum()
-    
-    ind_df = pd.DataFrame()
-    fig_timeline = None
-    ind_prof_str = "Non identificata"
-    
-    if selected_individual:
-        ind_df = df_fam_time[
-            (df_fam_time['nome'] == selected_individual) &
-            (df_fam_time['start_year'] >= start_yr) &
-            (df_fam_time['start_year'] <= end_yr)
-        ].copy()
-        
-        if not ind_df.empty:
-            ind_professions = ind_df['Professione'].dropna().unique()
-            ind_prof_str = ", ".join(ind_professions) if len(ind_professions) > 0 else "Non identificata"
-            
-            starts = []
-            finishes = []
-            for _, row in ind_df.iterrows():
-                s = row['data inizio mandato']
-                f = row['data fine mandato']
-                if pd.isna(s) or s is None:
-                    try:
-                        s = date(int(row['start_year']), 4, 1)
-                    except Exception:
-                        s = date(1300, 1, 1)
-                if pd.isna(f) or f is None or f == s:
-                    from datetime import timedelta
-                    f = s + timedelta(days=60)
-                starts.append(s)
-                finishes.append(f)
-                
-            ind_df['Start'] = starts
-            ind_df['Finish'] = finishes
-            ind_df['Start_Str'] = ind_df['Start'].apply(lambda x: x.isoformat() if hasattr(x, 'isoformat') else str(x))
-            ind_df['Finish_Str'] = ind_df['Finish'].apply(lambda x: x.isoformat() if hasattr(x, 'isoformat') else str(x))
-            ind_df['Duration_Ms'] = ind_df.apply(lambda r: (r['Finish'] - r['Start']).total_seconds() * 1000, axis=1)
-            
-            ind_df['Periodo'] = ind_df['anno'].astype(str) + " (" + ind_df['mesi'].astype(str) + ")"
-            ind_df['Ruolo e Quartiere'] = ind_df['ruolo'].astype(str) + ind_df['quartiere'].apply(lambda x: f" ({x})" if pd.notna(x) else "")
-            ind_df = ind_df.sort_values(by='Start')
-            
-            fig_timeline = go.Figure()
-            roles_in_ind = ind_df['ruolo'].unique()
-            colors_map = px.colors.qualitative.Pastel
-            role_colors = {r: colors_map[i % len(colors_map)] for i, r in enumerate(roles_in_ind)}
-            
-            for role in roles_in_ind:
-                df_role = ind_df[ind_df['ruolo'] == role]
-                fig_timeline.add_trace(go.Bar(
-                    name=role,
-                    y=df_role['Ruolo e Quartiere'],
-                    x=df_role['Duration_Ms'],
-                    base=df_role['Start_Str'],
-                    orientation='h',
-                    marker_color=role_colors[role],
-                    customdata=df_role[['Periodo', 'Professione', 'Start_Str', 'Finish_Str']],
-                    hovertemplate=(
-                        "<b>%{y}</b><br>"
-                        "Periodo: %{customdata[0]}<br>"
-                        "Professione: %{customdata[1]}<br>"
-                        "Inizio: %{customdata[2]}<br>"
-                        "Fine: %{customdata[3]}<br>"
-                        "<extra></extra>"
-                    )
-                ))
-                
-            xaxis_start = f"{start_yr}-01-01"
-            xaxis_end = f"{end_yr}-12-31"
-            fig_timeline.update_layout(
-                xaxis_type='date',
-                xaxis_range=[xaxis_start, xaxis_end],
-                template="plotly_white",
-                xaxis_title="Cronologia dei mandati",
-                yaxis_title="",
-                barmode='stack',
-                showlegend=True,
-                legend_title="Ruolo",
-                title=f"Timeline delle partecipazioni al consiglio di {selected_individual} ({start_yr}-{end_yr})"
+            fig_cumulative = px.line(
+                cumulative_melted,
+                x='Anno',
+                y='Conteggio Cumulativo',
+                color='Famiglia',
+                title=f"Conteggio cumulativo delle occorrenze nel tempo ({start_yr}-{end_yr})",
+                color_discrete_sequence=px.colors.qualitative.Pastel
             )
+            fig_cumulative.update_layout(
+                template="plotly_white",
+                legend_title="Famiglia",
+                xaxis_title="Anno",
+                yaxis_title="Conteggio Cumulativo"
+            )
+        
+        fig_prof = None
+        prof_role_top10 = None
+        if top_10_p_names:
+            prof_role_counts = filtered_time_df.groupby(['Professione', 'ruolo']).size().unstack(fill_value=0)
+        
+            # Ensure only existing columns/roles are used to avoid errors
+            existing_top_p = [p for p in top_10_p_names if p in prof_role_counts.index]
+            if existing_top_p:
+                prof_role_top10 = prof_role_counts.loc[existing_top_p]
+                prof_role_top10_melted = prof_role_top10.reset_index().melt(
+                    id_vars='Professione',
+                    var_name='Ruolo',
+                    value_name='Frequenza'
+                )
+                fig_prof = px.bar(
+                    prof_role_top10_melted,
+                    x='Professione',
+                    y='Frequenza',
+                    color='Ruolo',
+                    title="Top 10 Categorie Professionali per Ruolo",
+                    color_discrete_sequence=px.colors.qualitative.Pastel,
+                    barmode='stack'
+                )
+                fig_prof.update_layout(
+                    template="plotly_white",
+                    legend_title="Ruolo",
+                    xaxis={'categoryorder': 'array', 'categoryarray': existing_top_p},
+                    xaxis_title="Professione",
+                    yaxis_title="Numero di Cariche"
+                )
+        
+        top_overall_families = filtered_time_df['Famiglia'].value_counts().dropna().head(10).index.tolist()
+        role_distribution = pd.DataFrame()
+        if top_overall_families:
+            filtered_df_families = filtered_time_df[filtered_time_df['Famiglia'].isin(top_overall_families)]
+            role_distribution = filtered_df_families.groupby(['Famiglia', 'ruolo']).size().unstack(fill_value=0)
+    
+        fig_roles = go.Figure()
+        if not role_distribution.empty:
+            colors_map = px.colors.qualitative.Pastel
+            for idx, role in enumerate(role_distribution.columns):
+                fig_roles.add_trace(go.Bar(
+                    name=role,
+                    x=role_distribution.index,
+                    y=role_distribution[role],
+                    marker_color=colors_map[idx % len(colors_map)]
+                ))
+            fig_roles.update_layout(
+                barmode='stack',
+                title="Distribuzione dei Ruoli per le 10 Famiglie Principali",
+                xaxis_title="Famiglia",
+                yaxis_title="Numero di Cariche",
+                template="plotly_white",
+                legend_title="Ruolo"
+            )
+
+    
+        # Track selected family and individual in session_state to survive tab/navigation changes
+        all_families = sorted(df['Famiglia'].dropna().unique())
+        if 'persisted_family' not in st.session_state:
+            st.session_state['persisted_family'] = all_families[0] if all_families else None
+    
+        selected_family = st.session_state['persisted_family']
+        if selected_family not in all_families and all_families:
+            selected_family = all_families[0]
+            st.session_state['persisted_family'] = selected_family
+        
+        family_members_df = df_fam_time[
+            (df_fam_time['Famiglia'] == selected_family) & 
+            (df_fam_time['start_year'] >= start_yr) & 
+            (df_fam_time['start_year'] <= end_yr)
+        ].dropna(subset=['nome'])
+        family_individuals = sorted(family_members_df['nome'].dropna().unique()) if not family_members_df.empty else []
+    
+        if 'persisted_individual' not in st.session_state:
+            st.session_state['persisted_individual'] = family_individuals[0] if family_individuals else None
+        
+        selected_individual = st.session_state['persisted_individual']
+        if selected_individual not in family_individuals and family_individuals:
+            selected_individual = family_individuals[0]
+            st.session_state['persisted_individual'] = selected_individual
+        
+        # Precompute Family and Individual timelines/KPIs
+        family_members_df = family_members_df.sort_values(by='data inizio mandato', ascending=True)
+        table_display = family_members_df[['nome', 'ruolo', 'quartiere', 'anno', 'mesi']].copy()
+        table_display.columns = ['Nome', 'Ruolo', 'Quartiere', 'Anno', 'Mesi']
+    
+        family_role_counts = family_members_df['ruolo'].value_counts()
+        total_family_roles = family_role_counts.sum()
+    
+        family_quartiere_counts = family_members_df['quartiere'].value_counts(dropna=True)
+        total_family_q = family_quartiere_counts.sum()
+    
+        ind_df = pd.DataFrame()
+        fig_timeline = None
+        ind_prof_str = "Non identificata"
+    
+        if selected_individual:
+            ind_df = df_fam_time[
+                (df_fam_time['nome'] == selected_individual) &
+                (df_fam_time['start_year'] >= start_yr) &
+                (df_fam_time['start_year'] <= end_yr)
+            ].copy()
+        
+            if not ind_df.empty:
+                ind_professions = ind_df['Professione'].dropna().unique()
+                ind_prof_str = ", ".join(ind_professions) if len(ind_professions) > 0 else "Non identificata"
+            
+                starts = []
+                finishes = []
+                for _, row in ind_df.iterrows():
+                    s = row['data inizio mandato']
+                    f = row['data fine mandato']
+                    if pd.isna(s) or s is None:
+                        try:
+                            s = date(int(row['start_year']), 4, 1)
+                        except Exception:
+                            s = date(1300, 1, 1)
+                    if pd.isna(f) or f is None or f == s:
+                        from datetime import timedelta
+                        f = s + timedelta(days=60)
+                    starts.append(s)
+                    finishes.append(f)
+                
+                ind_df['Start'] = starts
+                ind_df['Finish'] = finishes
+                ind_df['Start_Str'] = ind_df['Start'].apply(lambda x: x.isoformat() if hasattr(x, 'isoformat') else str(x))
+                ind_df['Finish_Str'] = ind_df['Finish'].apply(lambda x: x.isoformat() if hasattr(x, 'isoformat') else str(x))
+                ind_df['Duration_Ms'] = ind_df.apply(lambda r: (r['Finish'] - r['Start']).total_seconds() * 1000, axis=1)
+            
+                ind_df['Periodo'] = ind_df['anno'].astype(str) + " (" + ind_df['mesi'].astype(str) + ")"
+                ind_df['Ruolo e Quartiere'] = ind_df['ruolo'].astype(str) + ind_df['quartiere'].apply(lambda x: f" ({x})" if pd.notna(x) else "")
+                ind_df = ind_df.sort_values(by='Start')
+            
+                fig_timeline = go.Figure()
+                roles_in_ind = ind_df['ruolo'].unique()
+                colors_map = px.colors.qualitative.Pastel
+                role_colors = {r: colors_map[i % len(colors_map)] for i, r in enumerate(roles_in_ind)}
+            
+                for role in roles_in_ind:
+                    df_role = ind_df[ind_df['ruolo'] == role]
+                    fig_timeline.add_trace(go.Bar(
+                        name=role,
+                        y=df_role['Ruolo e Quartiere'],
+                        x=df_role['Duration_Ms'],
+                        base=df_role['Start_Str'],
+                        orientation='h',
+                        marker_color=role_colors[role],
+                        customdata=df_role[['Periodo', 'Professione', 'Start_Str', 'Finish_Str']],
+                        hovertemplate=(
+                            "<b>%{y}</b><br>"
+                            "Periodo: %{customdata[0]}<br>"
+                            "Professione: %{customdata[1]}<br>"
+                            "Inizio: %{customdata[2]}<br>"
+                            "Fine: %{customdata[3]}<br>"
+                            "<extra></extra>"
+                        )
+                    ))
+                
+                xaxis_start = f"{start_yr}-01-01"
+                xaxis_end = f"{end_yr}-12-31"
+                fig_timeline.update_layout(
+                    xaxis_type='date',
+                    xaxis_range=[xaxis_start, xaxis_end],
+                    template="plotly_white",
+                    xaxis_title="Cronologia dei mandati",
+                    yaxis_title="",
+                    barmode='stack',
+                    showlegend=True,
+                    legend_title="Ruolo",
+                    title=f"Timeline delle partecipazioni al consiglio di {selected_individual} ({start_yr}-{end_yr})"
+                )
 
     # === PAGES ROUTING ===
     if page_option == "dashboard":
@@ -749,9 +1379,14 @@ if st.session_state['standardized_df'] is not None:
                     "Seleziona l'arco temporale per l'analisi delle famiglie",
                     min_value=min_year,
                     max_value=max_year,
-                    key="selected_year_range",
+                    key="selected_years_fam",
+                    on_change=sync_years,
+                    args=("selected_years_fam",),
                     step=1
                 )
+
+            st.markdown("### Analisi delle Famiglie e degli Individui")
+
                 
             st.markdown('<div class="section-header">1. Trend temporale</div>', unsafe_allow_html=True)
                     
@@ -839,46 +1474,35 @@ if st.session_state['standardized_df'] is not None:
                         else:
                             st.write("Nessun quartiere associato in questo arco temporale.")
                             
-                    # 3. Individual drill-down selector and list of participations
-                    st.markdown("<hr style='border: 0; height: 1px; background: #cbd5e1; margin: 2rem 0;' />", unsafe_allow_html=True)
-                    st.markdown('<div class="section-header">3. Dettaglio del Singolo Politico</div>', unsafe_allow_html=True)
-                    if family_individuals:
-                        selected_individual = st.selectbox(
-                            "Seleziona un esponente per visualizzare le sue partecipazioni",
-                            options=family_individuals,
-                            key="individual_widget_key",
-                            index=family_individuals.index(selected_individual) if selected_individual in family_individuals else 0,
-                            on_change=on_individual_change
-                        )
-                            
-                        if not ind_df.empty:
-                            col_ind_m1, col_ind_m2 = st.columns(2)
-                            with col_ind_m1:
-                                st.markdown(f'<div class="card"><div class="metric-value">{len(ind_df)}</div><div class="metric-label">Partecipazioni ({start_yr}-{end_yr})</div></div>', unsafe_allow_html=True)
-                            with col_ind_m2:
-                                st.markdown(f'<div class="card"><div class="metric-value">{ind_prof_str}</div><div class="metric-label">Professione Registrata</div></div>', unsafe_allow_html=True)
-                                
-                            # Substitute timeline chart with bold list of participations
-                            st.markdown("**Cronologia delle partecipazioni al consiglio:**")
-                            for _, row in ind_df.iterrows():
-                                anno = row['anno']
-                                mesi = row['mesi']
-                                ruolo = row['ruolo']
-                                quartiere = row.get('quartiere')
-                                q_str = f" ({quartiere})" if pd.notna(quartiere) and quartiere != "" else ""
-                                r_str = f" - {ruolo.capitalize()}{q_str}" if pd.notna(ruolo) and ruolo != "" else ""
-                                st.markdown(f"- **{anno} ({mesi})**{r_str}")
-                        else:
-                            st.info(f"Nessuna partecipazione registrata per {selected_individual} nell'arco temporale selezionato.")
-                    else:
-                        st.info("Nessun esponente con nome registrato trovato in questa famiglia.")
+                    # Section 3 (Individual drill-down) removed by request
                 else:
                     st.info(f"Nessuna partecipazione registrata per la famiglia {selected_family} nell'arco temporale selezionato ({start_yr}-{end_yr}).")
             else:
                 st.info("Nessuna famiglia rilevata nel dataset.")
+            
+            st.write("---")
+            fam_report_content = generate_markdown_report(start_yr, end_yr, filtered_time_df, 'Famiglie e Individui')
+            st.download_button(
+                label="📥 Scarica Report Famiglie e Individui (.MD)",
+                data=fam_report_content,
+                file_name=f"report_famiglie_individui_{start_yr}_{end_yr}.md",
+                mime="text/markdown",
+                key="download_report_md_families"
+            )
                 
         # Rendering code for Categorie Professionali
         with tab_professions:
+            if not df_fam_time.empty:
+                st.slider(
+                    "Seleziona l'arco temporale per l'analisi delle professioni",
+                    min_value=min_year,
+                    max_value=max_year,
+                    key="selected_years_prof",
+                    on_change=sync_years,
+                    args=("selected_years_prof",),
+                    step=1
+                )
+            
             st.markdown("### Analisi della Rappresentazione Professionale")
             
             st.markdown("**Ruoli da analizzare (selezionabili singolarmente o in combinazione)**")
@@ -904,10 +1528,11 @@ if st.session_state['standardized_df'] is not None:
             if not selected_prof_roles:
                 st.warning("Seleziona almeno un ruolo da analizzare.")
             else:
-                # Dynamically filter df by selected roles
-                df_prof_filtered = analysis_df[analysis_df['ruolo'].isin(selected_prof_roles)].copy()
+                # Dynamically filter df by selected roles AND year range
+                df_prof_filtered = filtered_time_df[filtered_time_df['ruolo'].isin(selected_prof_roles)].copy()
                 profession_counts_f = df_prof_filtered['Professione'].value_counts().dropna()
                 top_10_p_names_f = profession_counts_f.head(10).index.tolist()
+
                 
                 fig_prof_f = None
                 if top_10_p_names_f:
@@ -1050,10 +1675,32 @@ if st.session_state['standardized_df'] is not None:
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
+            
+            st.write("---")
+            prof_report_content = generate_markdown_report(start_yr, end_yr, filtered_time_df, 'Categorie Professionali')
+            st.download_button(
+                label="📥 Scarica Report Categorie Professionali (.MD)",
+                data=prof_report_content,
+                file_name=f"report_categorie_professionali_{start_yr}_{end_yr}.md",
+                mime="text/markdown",
+                key="download_report_md_professions"
+            )
                     
         # Rendering code for Distribuzione Cariche
         with tab_roles:
+            if not df_fam_time.empty:
+                st.slider(
+                    "Seleziona l'arco temporale per l'analisi della distribuzione delle cariche",
+                    min_value=min_year,
+                    max_value=max_year,
+                    key="selected_years_roles",
+                    on_change=sync_years,
+                    args=("selected_years_roles",),
+                    step=1
+                )
+            
             st.markdown("### Distribuzione delle Cariche per le Famiglie Principali")
+
             st.write(
                 "Visualizzazione di come le cariche principali (priore, anziano #1, anziano #2, "
                 "notaio anziani, canc. maior) si distribuiscono tra le 10 famiglie più rappresentate complessivamente."
@@ -1076,10 +1723,32 @@ if st.session_state['standardized_df'] is not None:
             
             st.markdown("**Dati della Distribuzione (Tabella)**")
             st.dataframe(role_distribution, width='stretch')
+            
+            st.write("---")
+            roles_report_content = generate_markdown_report(start_yr, end_yr, filtered_time_df, 'Distribuzione Cariche')
+            st.download_button(
+                label="📥 Scarica Report Distribuzione Cariche (.MD)",
+                data=roles_report_content,
+                file_name=f"report_distribuzione_cariche_{start_yr}_{end_yr}.md",
+                mime="text/markdown",
+                key="download_report_md_roles"
+            )
 
         # Rendering code for Ricambio nel Tempo
         with tab_turnover:
-            st.markdown("## Analisi del Ricambio dei Gruppi nel Tempo")
+            if not df_fam_time.empty:
+                st.slider(
+                    "Seleziona l'arco temporale per l'analisi del ricambio",
+                    min_value=min_year,
+                    max_value=max_year,
+                    key="selected_years_turnover",
+                    on_change=sync_years,
+                    args=("selected_years_turnover",),
+                    step=1
+                )
+            
+            st.markdown("### Analisi del Ricambio dei Gruppi nel Tempo")
+                
             st.write(
                 "Questa sezione analizza il tasso di ricambio e la stabilità delle cariche politiche "
                 "confrontando la composizione dei membri dei vari consigli storici nel tempo."
@@ -1102,9 +1771,30 @@ if st.session_state['standardized_df'] is not None:
             
             # Define names for plain-language text interpolation
             unit_names_pl = {
-                "nome": {"singular": "persona", "plural": "persone", "capital_plural": "Politici", "prefix": "dei singoli politici"},
-                "Famiglia": {"singular": "famiglia", "plural": "famiglie", "capital_plural": "Famiglie", "prefix": "delle famiglie/casate"},
-                "quartiere": {"singular": "quartiere", "plural": "quartieri", "capital_plural": "Quartieri", "prefix": "dei quartieri di provenienza"}
+                "nome": {
+                    "singular": "persona",
+                    "plural": "persone",
+                    "capital_plural": "Politici",
+                    "prefix": "dei singoli politici",
+                    "agreement_noun": "persone",
+                    "agreement_adj": "nuove"
+                },
+                "Famiglia": {
+                    "singular": "famiglia",
+                    "plural": "famiglie",
+                    "capital_plural": "Famiglie",
+                    "prefix": "delle famiglie/casate",
+                    "agreement_noun": "famiglie",
+                    "agreement_adj": "nuove"
+                },
+                "quartiere": {
+                    "singular": "quartiere",
+                    "plural": "quartieri",
+                    "capital_plural": "Quartieri",
+                    "prefix": "dei quartieri di provenienza",
+                    "agreement_noun": "quartieri",
+                    "agreement_adj": "nuovi"
+                }
             }
             u_info = unit_names_pl[column_name]
             
@@ -1144,138 +1834,456 @@ if st.session_state['standardized_df'] is not None:
                 if not selected_roles:
                     st.warning("Seleziona almeno un ruolo da analizzare.")
                 else:
-                    col_t1, col_t2 = st.columns(2)
-                    with col_t1:
-                        start_council = st.selectbox(
-                            "Seleziona il consiglio di inizio",
-                            options=councils_list,
-                            index=0,
-                            key="turnover_start_council"
-                        )
-                    
-                    start_idx = councils_list.index(start_council)
-                    end_options = councils_list[start_idx:]
-                    
-                    with col_t2:
-                        end_council = st.selectbox(
-                            "Seleziona il consiglio di fine",
-                            options=end_options,
-                            index=len(end_options) - 1,
-                            key="turnover_end_council"
-                        )
-                    
-                    start_mandate = int(start_council.split('.')[0])
-                    end_mandate = int(end_council.split('.')[0])
-                    
-                    # Run helper metrics (passing the dynamic column_name!)
-                    metrics = compute_turnover_metrics(df, selected_roles, start_mandate, end_mandate, column_name=column_name)
-                    
-                    if metrics is None:
-                        st.info("Nessun dato trovato per i ruoli e periodo selezionati.")
-                    else:
-                        avg_turnover = metrics['avg_turnover']
-                        avg_steps = metrics['avg_steps']
-                        pct_overlap_start = metrics['pct_overlap_start']
-                        shared_members = metrics['shared_members']
-                        start_members = metrics['start_members']
-                        end_members = metrics['end_members']
-                        top_members = metrics['top_members']
-                        
-                        if avg_steps is not None:
-                            avg_months = avg_steps * 2
-                            complete_turnover_str = f"{avg_steps:.1f} Consigli (~{avg_months:.1f} Mesi)"
+                    # Determine start and end mandates dynamically from the year-filtered dataset
+                    if not filtered_time_df.empty:
+                        active_mandates_filtered = sorted(filtered_time_df['numero mandato'].dropna().unique())
+                        if active_mandates_filtered:
+                            start_mandate = int(active_mandates_filtered[0])
+                            end_mandate = int(active_mandates_filtered[-1])
                         else:
-                            complete_turnover_str = "Non raggiungibile nel periodo"
-                            
-                        # Render KPI Grid
-                        col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
-                        with col_kpi1:
-                            st.markdown(f'<div class="card"><div class="metric-value">{avg_turnover:.1f}%</div><div class="metric-label">Ricambio Medio Consecutivo</div></div>', unsafe_allow_html=True)
-                        with col_kpi2:
-                            st.markdown(f'<div class="card"><div class="metric-value">{complete_turnover_str}</div><div class="metric-label">Tempo per Ricambio Completo</div></div>', unsafe_allow_html=True)
-                        with col_kpi3:
-                            st.markdown(f'<div class="card"><div class="metric-value">{pct_overlap_start:.1f}%</div><div class="metric-label">Sovrapposizione Inizio-Fine ({len(shared_members)} comm.)</div></div>', unsafe_allow_html=True)
-                            
-                        st.write("---")
+                            start_mandate = 1
+                            end_mandate = 1
+                    else:
+                        start_mandate = 1
+                        end_mandate = 1
+
+                    # Helper to get council labels
+                    def get_council_label(m_num):
+                        rows = df_councils[df_councils['numero mandato'] == m_num]
+                        if not rows.empty:
+                            r = rows.iloc[0]
+                            return f"{m_num}. {r['anno']} ({r['mesi']})"
+                        return f"Mandato {m_num}"
+
+                    start_council_lbl = get_council_label(start_mandate)
+                    end_council_lbl = get_council_label(end_mandate)
+
+                    # Sub-tabs for the different types of analysis
+                    subtab_rolling, subtab_cohorts, subtab_recurrence, subtab_concentration = st.tabs([
+                        "Confronto Rolling (Consiglio vs Consiglio)",
+                        "Confronto per Finestre (Coorti)",
+                        "Analisi di Ricorrenza (Carriere)",
+                        "Indice di Concentrazione (Oligarchia)"
+                    ])
+
+                    with subtab_rolling:
+                        st.markdown("### 1. Confronto Rolling (Consiglio vs Consiglio)")
+                        st.write(
+                            "Questo metodo confronta di volta in volta ogni singolo consiglio con quello "
+                            "successivo a distanza di una determinata soglia (gap). "
+                            "Fornisce una misura dettagliata della rotazione a brevissimo termine."
+                        )
                         
-                        # Render Charts and Explanations Row
-                        col_chart1, col_explain = st.columns([1, 1])
-                        with col_chart1:
-                            if not top_members.empty:
-                                top_n = 10
-                                fig_top_members = px.bar(
-                                    x=top_members.head(top_n).values,
-                                    y=top_members.head(top_n).index,
-                                    orientation='h',
-                                    title=f"Top {top_n} {u_info['capital_plural']} per Numero di Partecipazioni",
-                                    labels={'x': 'Partecipazioni (mandati)', 'y': u_info['singular'].capitalize()},
+                        st.warning("""
+                        **Nota Storico-Metodologica:** In questa vista rolling, il ricambio medio rimane costantemente prossimo al 100%. 
+                        Ciò è dovuto alla **regola del divieto (o contumacia)** in vigore a Pisa (che vietava la rielezione immediata) e al fatto che ciascun consiglio ha pochissimi seggi (es. 8) rispetto alle centinaia di cittadini eleggibili. 
+                        Per osservare dinamiche di medio-lungo termine e aggirare questo effetto contumacia, ti consigliamo di esplorare le schede **Confronto per Finestre (Coorti)** e **Analisi di Ricorrenza (Carriere)**.
+                        """)
+
+                        # Step slider for custom interval gap
+                        turnover_step_options = [
+                            "6 mesi (3 consigli)",
+                            "1 anno (6 consigli)",
+                            "2 anni (12 consigli)",
+                            "3 anni (18 consigli)",
+                            "4 anni (24 consigli)",
+                            "5 anni (30 consigli)",
+                            "6 anni (36 consigli)",
+                            "7 anni (42 consigli)",
+                            "8 anni (48 consigli)",
+                            "9 anni (54 consigli)",
+                            "10 anni (60 consigli)",
+                            "15 anni (90 consigli)",
+                            "20 anni (120 consigli)",
+                            "25 anni (150 consigli)",
+                            "30 anni (180 consigli)"
+                        ]
+                        
+                        selected_step_label = st.select_slider(
+                            "Seleziona l'intervallo temporale per il calcolo del ricambio",
+                            options=turnover_step_options,
+                            value="6 mesi (3 consigli)",
+                            key="turnover_step_slider"
+                        )
+                        
+                        option_to_step = {
+                            "6 mesi (3 consigli)": 3,
+                            "1 anno (6 consigli)": 6,
+                            "2 anni (12 consigli)": 12,
+                            "3 anni (18 consigli)": 18,
+                            "4 anni (24 consigli)": 24,
+                            "5 anni (30 consigli)": 30,
+                            "6 anni (36 consigli)": 36,
+                            "7 anni (42 consigli)": 42,
+                            "8 anni (48 consigli)": 48,
+                            "9 anni (54 consigli)": 54,
+                            "10 anni (60 consigli)": 60,
+                            "15 anni (90 consigli)": 90,
+                            "20 anni (120 consigli)": 120,
+                            "25 anni (150 consigli)": 150,
+                            "30 anni (180 consigli)": 180
+                        }
+                        step_size = option_to_step[selected_step_label]
+                        
+                        # Run helper metrics (passing step_size!)
+                        metrics = compute_turnover_metrics(df, selected_roles, start_mandate, end_mandate, step_size=step_size, column_name=column_name)
+                        
+                        if metrics is None:
+                            st.info("Nessun dato trovato per i ruoli e periodo selezionati.")
+                        else:
+                            avg_turnover = metrics['avg_turnover']
+                            avg_steps = metrics['avg_steps']
+                            pct_overlap_start = metrics['pct_overlap_start']
+                            shared_members = metrics['shared_members']
+                            start_members = metrics['start_members']
+                            end_members = metrics['end_members']
+                            top_members = metrics['top_members']
+                            
+                            if avg_steps is not None:
+                                avg_months = avg_steps * 2
+                                complete_turnover_str = f"{avg_steps:.1f} Consigli (~{avg_months:.1f} Mesi)"
+                            else:
+                                complete_turnover_str = "Non raggiungibile nel periodo"
+                                
+                            # Render KPI Grid
+                            col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+                            with col_kpi1:
+                                st.markdown(f'<div class="card"><div class="metric-value">{avg_turnover:.1f}%</div><div class="metric-label">Ricambio Medio (Intervallo: {selected_step_label})</div></div>', unsafe_allow_html=True)
+                            with col_kpi2:
+                                st.markdown(f'<div class="card"><div class="metric-value">{complete_turnover_str}</div><div class="metric-label">Tempo per Ricambio Completo</div></div>', unsafe_allow_html=True)
+                            with col_kpi3:
+                                st.markdown(f'<div class="card"><div class="metric-value">{pct_overlap_start:.1f}%</div><div class="metric-label">Sovrapposizione Inizio-Fine ({len(shared_members)} comm.)</div></div>', unsafe_allow_html=True)
+                                
+                            st.write("---")
+
+                            # Render Charts and Explanations Row
+                            col_chart1, col_explain = st.columns([1, 1])
+                            with col_chart1:
+                                if not top_members.empty:
+                                    top_n = 10
+                                    fig_top_members = px.bar(
+                                        x=top_members.head(top_n).values,
+                                        y=top_members.head(top_n).index,
+                                        orientation='h',
+                                        title=f"Top {top_n} {u_info['capital_plural']} per Numero di Partecipazioni ({start_yr}-{end_yr})",
+                                        labels={'x': 'Partecipazioni (mandati)', 'y': u_info['singular'].capitalize()},
+                                        color_discrete_sequence=px.colors.qualitative.Pastel
+                                    )
+                                    fig_top_members.update_layout(
+                                        yaxis={'categoryorder': 'total ascending'},
+                                        template="plotly_white",
+                                        height=400
+                                    )
+                                    st.plotly_chart(fig_top_members, width='stretch')
+                                else:
+                                    st.info("Nessun dato registrato in questo periodo.")
+                                    
+                            with col_explain:
+                                st.markdown(f"""
+                                <div class="card" style="padding: 1.5rem; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
+                                    <h4 style="margin-top:0; color: #0f172a; font-family: 'Outfit', sans-serif; font-size: 1.2rem; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.5rem;">Guida Semplice alle Statistiche</h4>
+                                    <p style="font-size: 0.95rem; line-height: 1.5; color: #334155; margin-bottom: 1rem;">
+                                        Questi numeri ti aiutano a capire quanto velocemente cambiava il gruppo di potere nei consigli di Pisa nell'arco selezionato ({start_yr}-{end_yr}):
+                                    </p>
+                                    <ul style="padding-left: 1.25rem; margin: 0; font-size: 0.95rem; color: #334155;">
+                                        <li style="margin-bottom: 0.75rem;">
+                                            <strong>Ricambio Medio ({avg_turnover:.1f}%):</strong> 
+                                            Indica quante facce nuove entravano in consiglio a distanza di <strong>{selected_step_label}</strong>. 
+                                            Un valore di <strong>{avg_turnover:.1f}%</strong> significa che, in media, confrontando due consigli a distanza di {selected_step_label}, quasi 
+                                            {int(avg_turnover)} su 100 {u_info['plural']} erano nuovi ingressi rispetto al consiglio di confronto.
+                                        </li>
+                                        <li style="margin-bottom: 0.75rem;">
+                                            <strong>Tempo per Ricambio Completo ({complete_turnover_str}):</strong> 
+                                            Rappresenta il tempo medio necessario affinché <strong>tutti</strong> i membri di un consiglio venissero sostituiti da persone nuove. 
+                                            Ci dice quindi dopo quanti consigli (e quanti mesi stimati) non era rimasta in carica nessuna delle vecchie persone del consiglio di partenza.
+                                        </li>
+                                        <li style="margin-bottom: 0.75rem;">
+                                            <strong>Sovrapposizione Inizio-Fine ({pct_overlap_start:.1f}%):</strong> 
+                                            Mette a confronto il consiglio iniziale ({start_council_lbl}) e quello finale ({end_council_lbl}) del periodo selezionato. 
+                                            La percentuale del <strong>{pct_overlap_start:.1f}%</strong> indica la porzione di {u_info['plural']} che sono riusciti a rimanere 
+                                            (o a ritornare) al potere tra l'inizio e la fine del periodo. Più è alta, più il potere è rimasto nelle mani degli stessi gruppi.
+                                        </li>
+                                    </ul>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                    
+                            st.write("---")
+                            
+                            # Detailed Overlap Section
+                            st.markdown(f"### Dettaglio Sovrapposizione Estremi (Inizio vs Fine)")
+                            col_start_list, col_end_list = st.columns(2)
+                            with col_start_list:
+                                st.markdown(f"**{u_info['capital_plural']} presenti all'inizio ({start_council_lbl})**")
+                                if start_members:
+                                    st.write(", ".join(sorted(list(start_members))))
+                                else:
+                                    st.write(f"*Nessun {u_info['singular']} registrato per questi ruoli*")
+                            with col_end_list:
+                                st.markdown(f"**{u_info['capital_plural']} presenti alla fine ({end_council_lbl})**")
+                                if end_members:
+                                    st.write(", ".join(sorted(list(end_members))))
+                                else:
+                                    st.write(f"*Nessun {u_info['singular']} registrato per questi ruoli*")
+                                    
+                            st.markdown(f"**{u_info['capital_plural']} condivisi (in comune tra l'inizio e la fine del periodo):**")
+                            if shared_members:
+                                st.success(", ".join(sorted(list(shared_members))))
+                            else:
+                                st.info(f"Nessun {u_info['singular']} in comune tra l'inizio e la fine del periodo selezionato.")
+
+                    with subtab_cohorts:
+                        st.markdown("### 2. Confronto per Finestre Temporali (Coorti)")
+                        st.write(
+                            "Questo metodo raggruppa tutti i consigli in blocchi pluriennali (coorti) consecutivi. "
+                            "Filtra la rotazione a breve termine (contumacia) per analizzare la circolazione della classe politica nel medio-lungo termine."
+                        )
+                        
+                        # Determine block size
+                        block_size = st.slider("Dimensione della finestra temporale (in anni)", min_value=2, max_value=10, value=5, step=1, key="turnover_cohort_block_size")
+                        
+                        # Split active year range into blocks
+                        blocks = []
+                        curr_yr = start_yr
+                        while curr_yr <= end_yr:
+                            next_yr = min(curr_yr + block_size - 1, end_yr)
+                            blocks.append((curr_yr, next_yr))
+                            curr_yr += block_size
+                            
+                        # Calculate turnover between consecutive blocks
+                        cohort_turnovers = []
+                        cohort_chart_data = []
+                        
+                        # Store unique members per block
+                        block_members = {}
+                        for b_start, b_end in blocks:
+                            b_df = filtered_time_df[
+                                (filtered_time_df['start_year'] >= b_start) & 
+                                (filtered_time_df['start_year'] <= b_end) &
+                                (filtered_time_df['ruolo'].isin(selected_roles))
+                            ]
+                            members = set(b_df[column_name].dropna().unique())
+                            block_members[(b_start, b_end)] = members
+                            
+                        for i in range(len(blocks) - 1):
+                            b1 = blocks[i]
+                            b2 = blocks[i+1]
+                            m1 = block_members[b1]
+                            m2 = block_members[b2]
+                            if m1 and m2:
+                                new_m = m2 - m1
+                                turnval = (len(new_m) / len(m2)) * 100
+                                cohort_turnovers.append(turnval)
+                                label = f"{b1[0]}-{b1[1]} vs {b2[0]}-{b2[1]}"
+                                cohort_chart_data.append({
+                                    'Confronto': label,
+                                    'Ricambio Coorti (%)': turnval
+                                })
+                                
+                        if cohort_chart_data:
+                            df_cohort_c = pd.DataFrame(cohort_chart_data)
+                            avg_cohort_t = np.mean(cohort_turnovers)
+                            
+                            col_c1, col_c2 = st.columns([2, 1])
+                            with col_c1:
+                                fig_cohort = px.line(
+                                    df_cohort_c,
+                                    x='Confronto',
+                                    y='Ricambio Coorti (%)',
+                                    title=f"Ricambio tra Finestre Temporali di {block_size} anni (Media: {avg_cohort_t:.1f}%)",
+                                    markers=True,
                                     color_discrete_sequence=px.colors.qualitative.Pastel
                                 )
-                                fig_top_members.update_layout(
-                                    yaxis={'categoryorder': 'total ascending'},
-                                    template="plotly_white",
-                                    height=400
-                                )
-                                st.plotly_chart(fig_top_members, width='stretch')
-                            else:
-                                st.info("Nessun dato registrato in questo periodo.")
-                                
-                        with col_explain:
-                            st.markdown(f"""
-                            <div class="card" style="padding: 1.5rem; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
-                                <h4 style="margin-top:0; color: #0f172a; font-family: 'Outfit', sans-serif; font-size: 1.2rem; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.5rem;">Guida Semplice alle Statistiche</h4>
-                                <p style="font-size: 0.95rem; line-height: 1.5; color: #334155; margin-bottom: 1rem;">
-                                    Questi numeri ti aiutano a capire quanto velocemente cambiava il gruppo di potere nei consigli di Pisa:
-                                </p>
-                                <ul style="padding-left: 1.25rem; margin: 0; font-size: 0.95rem; color: #334155;">
-                                    <li style="margin-bottom: 0.75rem;">
-                                        <strong>Ricambio Medio Consecutivo ({avg_turnover:.1f}%):</strong> 
-                                        Indica quante facce nuove entravano in consiglio da un mandato a quello successivo. 
-                                        Un valore di <strong>{avg_turnover:.1f}%</strong> significa che, in media, ogni volta che si nominava un nuovo consiglio, quasi 
-                                        {int(avg_turnover)} su 100 {u_info['plural']} erano nuovi ingressi rispetto al consiglio immediatamente precedente.
-                                    </li>
-                                    <li style="margin-bottom: 0.75rem;">
-                                        <strong>Tempo per Ricambio Completo ({complete_turnover_str}):</strong> 
-                                        Rappresenta il tempo medio necessario affinché <strong>tutti</strong> i membri di un consiglio venissero sostituiti da persone nuove. 
-                                        Ci dice quindi dopo quanti consigli (e quanti mesi stimati) non era rimasta in carica nessuna delle vecchie persone del consiglio di partenza.
-                                    </li>
-                                    <li style="margin-bottom: 0.75rem;">
-                                        <strong>Sovrapposizione Inizio-Fine ({pct_overlap_start:.1f}%):</strong> 
-                                        Mette a confronto il consiglio iniziale e quello finale della finestra selezionata. 
-                                        La percentuale del <strong>{pct_overlap_start:.1f}%</strong> indica la porzione di {u_info['plural']} che sono riusciti a rimanere 
-                                        (o a ritornare) al potere tra l'inizio e la fine del periodo. Più è alta, più il potere è rimasto nelle mani degli stessi gruppi.
-                                    </li>
-                                </ul>
-                            </div>
-                            """, unsafe_allow_html=True)
-                                
-                        st.write("---")
-                        
-                        # Detailed Overlap Section
-                        st.markdown(f"### Dettaglio Sovrapposizione Estremi (Inizio vs Fine)")
-                        col_start_list, col_end_list = st.columns(2)
-                        with col_start_list:
-                            st.markdown(f"**{u_info['capital_plural']} presenti all'inizio ({start_council})**")
-                            if start_members:
-                                st.write(", ".join(sorted(list(start_members))))
-                            else:
-                                st.write(f"*Nessun {u_info['singular']} registrato per questi ruoli*")
-                        with col_end_list:
-                            st.markdown(f"**{u_info['capital_plural']} presenti alla fine ({end_council})**")
-                            if end_members:
-                                st.write(", ".join(sorted(list(end_members))))
-                            else:
-                                st.write(f"*Nessun {u_info['singular']} registrato per questi ruoli*")
-                                
-                        st.markdown(f"**{u_info['capital_plural']} condivisi (in comune tra l'inizio e la fine del periodo):**")
-                        if shared_members:
-                            st.success(", ".join(sorted(list(shared_members))))
+                                fig_cohort.update_layout(template="plotly_white", yaxis_range=[0, 105])
+                                st.plotly_chart(fig_cohort, width='stretch')
+                            with col_c2:
+                                st.markdown(f'<div class="card"><div class="metric-value">{avg_cohort_t:.1f}%</div><div class="metric-label">Ricambio Medio Coorti</div></div>', unsafe_allow_html=True)
+                                st.markdown(f"""
+                                <div style="font-size: 0.95rem; color: #334155; line-height: 1.6; padding: 1.5rem; border: 1px solid #e2e8f0; border-radius: 8px; background-color: #f8fafc;">
+                                    <h5 style="margin: 0 0 0.75rem 0; font-family: 'Outfit', sans-serif; font-size: 1.1rem; color: #0f172a;">Spiegazione Intuitiva</h5>
+                                    Invece di confrontare singoli consigli consecutivi (che mostrano tassi di ricambio vicini al 100% a causa delle regole di contumacia/divieto), raggruppiamo i mandati in blocchi di <strong>{block_size} anni</strong> (coorti).
+                                    <br><br>
+                                    Un ricambio medio delle coorti del <strong>{avg_cohort_t:.1f}%</strong> indica che, passando da un blocco di {block_size} anni al successivo:
+                                    <ul style="margin: 0.5rem 0; padding-left: 1.25rem;">
+                                        <li>Circa il <strong>{avg_cohort_t:.1f}%</strong> di {u_info['agreement_noun']} è composto da <strong>{u_info['agreement_adj']} entrate</strong> (soggetti mai apparsi nel blocco precedente).</li>
+                                        <li>Il restante <strong>{100.0 - avg_cohort_t:.1f}%</strong> di {u_info['agreement_noun']} rappresenta la <strong>continuità</strong> (soggetti già attivi nel periodo precedente che ritornano in carica).</li>
+                                    </ul>
+                                    Se questo tasso scende sensibilmente rispetto al confronto rolling, significa che la classe politica pisa era controllata da un nucleo stabile di persone o famiglie che si alternavano regolarmente al potere nel medio-lungo termine.
+                                </div>
+                                """, unsafe_allow_html=True)
                         else:
-                            st.info(f"Nessun {u_info['singular']} in comune tra l'inizio e la fine del periodo selezionato.")
+                            st.info("Periodo selezionato troppo breve per creare almeno due coorti successive di questa dimensione. Allarga il filtro degli anni in cima alla pagina.")
+
+                    with subtab_recurrence:
+                        st.markdown("### 3. Analisi di Ricorrenza (Carriere Politiche)")
+                        st.write(
+                            "Questo metodo analizza quante volte i singoli individui o famiglie "
+                            "ritornano a ricoprire le cariche politiche nel periodo selezionato. "
+                            "Rivela se il potere tende a concentrarsi ciclicamente sempre nelle stesse mani."
+                        )
+                        
+                        df_rec = filtered_time_df[filtered_time_df['ruolo'].isin(selected_roles)].copy()
+                        service_counts = df_rec[column_name].value_counts().dropna()
+                        
+                        if not service_counts.empty:
+                            total_unique = len(service_counts)
+                            more_than_once = (service_counts > 1).sum()
+                            rec_rate = (more_than_once / total_unique) * 100
+                            
+                            bins = [0, 1, 2, 4, 100]
+                            labels = ["1 sola volta", "2 volte", "3-4 volte", "5+ volte"]
+                            categorized = pd.cut(service_counts, bins=bins, labels=labels).value_counts().reindex(labels)
+                            
+                            categorized.index.name = 'Frequenza di ritorno'
+                            df_cat = categorized.reset_index(name='Numero di soggetti')
+                            
+                            col_r1, col_r2 = st.columns([2, 1])
+                            with col_r1:
+                                fig_rec = px.bar(
+                                    df_cat,
+                                    x='Frequenza di ritorno',
+                                    y='Numero di soggetti',
+                                    title=f"Frequenza di ritorno al potere ({start_yr}-{end_yr})",
+                                    text_auto=True,
+                                    color_discrete_sequence=px.colors.qualitative.Pastel
+                                )
+                                fig_rec.update_layout(template="plotly_white")
+                                st.plotly_chart(fig_rec, width='stretch')
+                            with col_r2:
+                                st.markdown(f'<div class="card"><div class="metric-value">{rec_rate:.1f}%</div><div class="metric-label">Tasso di Ricorrenza (Ritorno al potere)</div></div>', unsafe_allow_html=True)
+                                st.markdown(f"""
+                                <div style="font-size: 0.95rem; color: #334155; line-height: 1.6; padding: 1.5rem; border: 1px solid #e2e8f0; border-radius: 8px; background-color: #f8fafc;">
+                                    <h5 style="margin: 0 0 0.75rem 0; font-family: 'Outfit', sans-serif; font-size: 1.1rem; color: #0f172a;">Spiegazione Intuitiva</h5>
+                                    Questa sezione mostra quante volte gli stessi soggetti (singole persone o intere famiglie) riescono a tornare al potere durante il periodo selezionato.
+                                    <br><br>
+                                    Un tasso di ricorrenza del <strong>{rec_rate:.1f}%</strong> indica che {int(rec_rate)} su 100 {u_info['agreement_noun']} unici presenti nel periodo sono <strong>ritornati in carica almeno una seconda volta</strong>.
+                                    <br><br>
+                                    Se le categorie "3-4 volte" o "5+ volte" sono molto popolate, abbiamo la prova empirica di una <em>classe politica professionale e persistente</em>, che aggira il divieto di rielezione immediata ritornando al potere non appena scade il periodo obbligatorio di contumacia.
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                            st.markdown("---")
+                            st.markdown(f"### Dettaglio dei Soggetti più Ricorrenti ({start_yr}-{end_yr})")
+                            top_n_rec = 10
+                            top_recurrent = service_counts.head(top_n_rec)
+                            df_top_rec = pd.DataFrame({
+                                u_info['singular'].capitalize(): top_recurrent.index,
+                                'Numero di Mandati': top_recurrent.values
+                            })
+                            st.dataframe(df_top_rec, hide_index=True, width='stretch')
+                        else:
+                            st.info("Nessun dato disponibile per i filtri selezionati.")
+
+                    with subtab_concentration:
+                        st.markdown("### 4. Indice di Concentrazione (Concentrazione del Potere)")
+                        st.write(
+                            "Questo metodo misura la distribuzione della quota di cariche detenuta dai diversi soggetti. "
+                            "Usa l'indice di Gini (standard internazionale per la misurazione della diseguaglianza) e la curva di concentrazione per mostrare il livello di monopolizzazione."
+                        )
+                        
+                        df_rec = filtered_time_df[filtered_time_df['ruolo'].isin(selected_roles)].copy()
+                        service_counts = df_rec[column_name].value_counts().dropna()
+                        
+                        if not service_counts.empty:
+                            counts = service_counts.values
+                            counts_sorted = sorted(counts, reverse=True)
+                            total_seats = sum(counts_sorted)
+                            cum_seats = np.cumsum(counts_sorted)
+                            cum_percent_seats = (cum_seats / total_seats) * 100
+                            percent_pop = (np.arange(1, len(counts_sorted) + 1) / len(counts_sorted)) * 100
+                            
+                            percent_pop = np.insert(percent_pop, 0, 0.0)
+                            cum_percent_seats = np.insert(cum_percent_seats, 0, 0.0)
+                            
+                            def gini_coef(array):
+                                if len(array) == 0 or np.sum(array) == 0:
+                                    return 0.0
+                                array = np.array(array, dtype=np.float64)
+                                array = np.sort(array)
+                                index = np.arange(1, array.shape[0] + 1)
+                                n = array.shape[0]
+                                return ((2 * index - n - 1) * array).sum() / (n * array.sum())
+                                
+                            gini_v = gini_coef(counts)
+                            
+                            top_10_pct_count = max(1, int(len(counts_sorted) * 0.1))
+                            top_10_pct_share = cum_percent_seats[top_10_pct_count]
+                            
+                            df_lorenz = pd.DataFrame({
+                                'Percentuale Soggetti': percent_pop,
+                                'Percentuale Cumulata Seggi': cum_percent_seats
+                            })
+                            
+                            col_o1, col_o2 = st.columns([2, 1])
+                            with col_o1:
+                                fig_lorenz = px.area(
+                                    df_lorenz,
+                                    x='Percentuale Soggetti',
+                                    y='Percentuale Cumulata Seggi',
+                                    title=f"Curva di Concentrazione delle Cariche ({start_yr}-{end_yr})",
+                                    labels={'Percentuale Soggetti': '% dei Soggetti (ordinati dal più potente al meno potente)', 'Percentuale Cumulata Seggi': '% Cumulata delle cariche detenute'},
+                                    color_discrete_sequence=px.colors.qualitative.Pastel
+                                )
+                                fig_lorenz.add_trace(go.Scatter(
+                                    x=[0, 100],
+                                    y=[0, 100],
+                                    mode='lines',
+                                    name='Perfetta Uguaglianza (Rotazione Completa)',
+                                    line=dict(color='#94a3b8', dash='dash', width=2)
+                                ))
+                                fig_lorenz.update_layout(
+                                    template="plotly_white",
+                                    yaxis_range=[0, 105],
+                                    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+                                )
+                                st.plotly_chart(fig_lorenz, width='stretch')
+                            with col_o2:
+                                st.markdown(f'<div class="card"><div class="metric-value">{gini_v:.2f}</div><div class="metric-label">Indice di Gini (0 = Uguaglianza, 1 = Monopolio)</div></div>', unsafe_allow_html=True)
+                                st.markdown(f'<div class="card"><div class="metric-value">{top_10_pct_share:.1f}%</div><div class="metric-label">Quota Detenuta dal Top 10%</div></div>', unsafe_allow_html=True)
+                                st.markdown(f"""
+                                <div style="font-size: 0.95rem; color: #334155; line-height: 1.6; padding: 1.5rem; border: 1px solid #e2e8f0; border-radius: 8px; background-color: #f8fafc;">
+                                    <h5 style="margin: 0 0 0.75rem 0; font-family: 'Outfit', sans-serif; font-size: 1.1rem; color: #0f172a;">Spiegazione Intuitiva</h5>
+                                    L\'<strong>Indice di Gini</strong> è un coefficiente standard utilizzato per misurare la concentrazione o la diseguaglianza nella distribuzione di una risorsa (in questo caso, il potere politico misurato in cariche ricoperte):
+                                    <ul style="margin: 0.5rem 0; padding-left: 1.25rem;">
+                                        <li><strong>Valore pari a 0 (Perfetta Distribuzione):</strong> Tutti i soggetti ricoprono le cariche lo stesso numero di volte (es. una volta ciascuno).</li>
+                                        <li><strong>Valore vicino a 1 (Monopolizzazione Totale):</strong> Una sola persona o famiglia ricopre quasi tutte le cariche, escludendo gli altri.</li>
+                                    </ul>
+                                    In questo arco temporale, l\'indice è pari a <strong>{gini_v:.2f}</strong>.
+                                    <br><br>
+                                    Inoltre, il grafico mostra che il <strong>top 10%</strong> dei soggetti più influenti (pari a <strong>{top_10_pct_count}</strong> {u_info['agreement_noun']}) monopolizza ben il <strong>{top_10_pct_share:.1f}%</strong> del totale delle cariche disponibili. Questo indica una forte natura oligarchica della politica pisana nel periodo.
+                                </div>
+                                """, unsafe_allow_html=True)
+                        else:
+                            st.info("Nessun dato disponibile.")
+            
+            st.write("---")
+            turnover_report_content = generate_markdown_report(start_yr, end_yr, filtered_time_df, 'Ricambio nel Tempo')
+            st.download_button(
+                label="📥 Scarica Report Ricambio nel Tempo (.MD)",
+                data=turnover_report_content,
+                file_name=f"report_ricambio_tempo_{start_yr}_{end_yr}.md",
+                mime="text/markdown",
+                key="download_report_md_turnover"
+            )
+
+
 
         # Rendering code for Classifiche Personalizzate (Top N)
         with tab_rankings:
-            st.markdown("## Generatore di Classifiche Personalizzate (Top N)")
+            if not df_fam_time.empty:
+                ranking_selected_years = st.slider(
+                    "Seleziona l'arco temporale per la classifica",
+                    min_value=min_year,
+                    max_value=max_year,
+                    key="ranking_year_range_slider",
+                    on_change=sync_years,
+                    args=("ranking_year_range_slider",),
+                    step=1
+                )
+                start_yr_rank, end_yr_rank = ranking_selected_years
+            else:
+                start_yr_rank, end_yr_rank = min_year, max_year
+
+            st.markdown("### Generatore di Classifiche Personalizzate (Top N)")
             st.write(
                 "Questa sezione consente di calcolare le graduatorie delle cariche politiche per "
                 "scoprire chi ha ricoperto il maggior numero di ruoli nel Comune di Pisa, "
@@ -1302,20 +2310,7 @@ if st.session_state['standardized_df'] is not None:
                     step=5,
                     key="ranking_n_selector"
                 )
-            
-            # Sub-slider for year range
-            if not df_fam_time.empty:
-                ranking_selected_years = st.slider(
-                    "Seleziona l'arco temporale per la classifica",
-                    min_value=min_year,
-                    max_value=max_year,
-                    value=(min_year, max_year),
-                    step=1,
-                    key="ranking_year_range_slider"
-                )
-                start_yr_rank, end_yr_rank = ranking_selected_years
-            else:
-                start_yr_rank, end_yr_rank = min_year, max_year
+
                 
             st.write("---")
             
@@ -1361,8 +2356,404 @@ if st.session_state['standardized_df'] is not None:
                         mime="text/csv",
                         key="download_custom_ranking_btn"
                     )
+            
+            st.write("---")
+            rankings_report_content = generate_markdown_report(start_yr_rank, end_yr_rank, df_rank_filtered, 'Classifiche Personalizzate')
+            st.download_button(
+                label="📥 Scarica Report Classifiche Personalizzate (.MD)",
+                data=rankings_report_content,
+                file_name=f"report_classifiche_personalizzate_{start_yr_rank}_{end_yr_rank}.md",
+                mime="text/markdown",
+                key="download_report_md_rankings"
+            )
+
+    elif page_option == "savi":
+        st.markdown('<div class="section-header">Analisi del Consiglio dei Savi</div>', unsafe_allow_html=True)
+        st.write(
+            "Il Consiglio dei Savi costituiva l'organo decisionale di vertice (l'élite decisionale) della Pisa "
+            "medievale, operante a stretto contatto con il Consiglio degli Anziani. "
+            "Questa dashboard mappa le dinamiche di potere e le reti di consorterie (parentele) suddivise in 5 Cerchi di Potere."
+        )
+
+        SAVI_EXCEL_PATH = os.path.join("data", "Lista di Savi e Cerchi di potere.xlsx")
+        savi_std_csv = os.path.join("data", "savi_standardized.csv")
+        savi_circ_csv = os.path.join("data", "savi_circles.csv")
+        csv_target = os.path.join("data", "total_df.csv")
+
+        # Check if precomputed CSV files exist, if not, generate them on the fly (first-time fallback)
+        if not os.path.exists(savi_std_csv) or not os.path.exists(savi_circ_csv):
+            if os.path.exists(csv_target) and os.path.exists(SAVI_EXCEL_PATH):
+                try:
+                    with st.spinner("Calcolo iniziale dei Cerchi di Potere in corso..."):
+                        precompute_and_save_savi_data(SAVI_EXCEL_PATH, csv_target)
+                except Exception as ex:
+                    st.error(f"Errore nella generazione dei file pre-elaborati dei Savi: {ex}")
+                    st.stop()
+            else:
+                st.info(f"Il database dei Savi predefinito non è stato trovato in '{SAVI_EXCEL_PATH}'. Per favore, carica un file Excel nella pagina di Download per iniziare.")
+                st.stop()
+
+        # Load precomputed data
+        if True: # Keep block structure for indentation compatibility
+            try:
+                df_savi = pd.read_csv(savi_std_csv)
+                df_circles = pd.read_csv(savi_circ_csv)
+                
+                c0 = df_circles[df_circles['cerchio'] == 'C0']['nome'].dropna().tolist()
+                c1 = df_circles[df_circles['cerchio'] == 'C1']['nome'].dropna().tolist()
+                c2 = df_circles[df_circles['cerchio'] == 'C2']['nome'].dropna().tolist()
+                c3 = df_circles[df_circles['cerchio'] == 'C3']['nome'].dropna().tolist()
+                c4 = df_circles[df_circles['cerchio'] == 'C4']['nome'].dropna().tolist()
+                
+                df_anziani_unici = df_circles[df_circles['cerchio'].isin(['C2', 'C3', 'C4'])].copy()
+                
+                # 3. KPI Metrics
+                st.markdown('<div class="section-header">1. Dimensioni dei Cerchi di Potere (Individui Fisici Unici)</div>', unsafe_allow_html=True)
+                col_c0, col_c1, col_c2, col_c3, col_c4 = st.columns(5)
+                with col_c0:
+                    st.markdown(f'<div class="card"><div class="metric-value">{len(c0)}</div><div class="metric-label">C0: Aristocrazia (Solo Savi)</div></div>', unsafe_allow_html=True)
+                with col_c1:
+                    st.markdown(f'<div class="card"><div class="metric-value">{len(c1)}</div><div class="metric-label">C1: Nobiltà Ist. (Entrambi)</div></div>', unsafe_allow_html=True)
+                with col_c2:
+                    st.markdown(f'<div class="card"><div class="metric-value">{len(c2)}</div><div class="metric-label">C2: Elite (Entrambi)</div></div>', unsafe_allow_html=True)
+                with col_c3:
+                    st.markdown(f'<div class="card"><div class="metric-value">{len(c3)}</div><div class="metric-label">C3: Consorterie (Parenti C2)</div></div>', unsafe_allow_html=True)
+                with col_c4:
+                    st.markdown(f'<div class="card"><div class="metric-value">{len(c4)}</div><div class="metric-label">C4: Nuovi Attori (Esterni)</div></div>', unsafe_allow_html=True)
+                
+                st.write("---")
+                
+                # Precompute Neighborhood Composition Chart
+                df_circles_clean = df_circles.copy()
+                df_circles_clean['quartiere'] = df_circles_clean['quartiere'].astype(str).str.strip().str.capitalize()
+                
+                circle_name_map = {
+                    'C0': 'C0: Aristocrazia',
+                    'C1': 'C1: Nobiltà Ist.',
+                    'C2': 'C2: Elite',
+                    'C3': 'C3: Consorterie',
+                    'C4': 'C4: Nuovi Attori'
+                }
+                df_circles_clean['cerchio_desc'] = df_circles_clean['cerchio'].map(circle_name_map)
+                df_q = df_circles_clean.groupby(['cerchio_desc', 'quartiere']).size().reset_index(name='Individui')
+                category_order = ['C0: Aristocrazia', 'C1: Nobiltà Ist.', 'C2: Elite', 'C3: Consorterie', 'C4: Nuovi Attori']
+                
+                fig_neighborhoods = px.bar(
+                    df_q,
+                    x='cerchio_desc',
+                    y='Individui',
+                    color='quartiere',
+                    barmode='stack',
+                    title="Composizione per Quartiere nei Cerchi di Potere",
+                    labels={'cerchio_desc': 'Cerchio di Potere', 'Individui': 'Numero di Individui', 'quartiere': 'Quartiere'},
+                    color_discrete_sequence=['#94a3b8', '#818cf8', '#34d399', '#f87171']
+                )
+                fig_neighborhoods.update_layout(
+                    template="plotly_white",
+                    xaxis={'categoryorder': 'array', 'categoryarray': category_order},
+                    xaxis_title="",
+                    yaxis_title="Numero di Individui"
+                )
+
+                # 4. Side-by-side charts
+                col_chart1, col_chart2 = st.columns(2)
+                with col_chart1:
+                    fig_circles = px.bar(
+                        x=['C0: Aristocrazia', 'C1: Nobiltà Ist.', 'C2: Elite', 'C3: Consorterie', 'C4: Nuovi Attori'],
+                        y=[len(c0), len(c1), len(c2), len(c3), len(c4)],
+                        labels={'x': 'Cerchio di Potere', 'y': 'Persone Fisiche (Uniche)'},
+                        title="Distribuzione Finale degli Individui per Cerchi di Potere",
+                        color_discrete_sequence=['#475569']
+                    )
+                    fig_circles.update_layout(
+                        template="plotly_white",
+                        yaxis_title="Numero di Individui Fisici",
+                        xaxis_title=""
+                    )
+                    st.plotly_chart(fig_circles, width='stretch')
+                
+                with col_chart2:
+                    st.plotly_chart(fig_neighborhoods, width='stretch')
+                
+                # Definitions box below the charts (full width)
+                st.markdown("""
+                <div class="card" style="padding: 1.25rem; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; margin-top: 1rem;">
+                    <h5 style="margin-top: 0; color: #0f172a; font-family: 'Outfit', sans-serif; font-size: 1.1rem; border-bottom: 1px solid #cbd5e1; padding-bottom: 0.5rem;">Definizione dei Cerchi di Potere</h5>
+                    <ul style="margin: 0.5rem 0 0 0; padding-left: 1.25rem; font-size: 0.85rem; color: #334155; line-height: 1.6;">
+                        <li style="margin-bottom: 0.5rem;"><strong>C0: Nobili Solo Savi</strong>. Esponenti dell'aristocrazia pura che mantengono cariche solo in seno al Consiglio dei Savi.</li>
+                        <li style="margin-bottom: 0.5rem;"><strong>C1: Nobili in Entrambi</strong>. Nobili che siedono contemporaneamente o in tempi diversi in entrambi i consigli (fenomeno quasi inesistente).</li>
+                        <li style="margin-bottom: 0.5rem;"><strong>C2: Elite (Non Nobili)</strong>. Uomini nuovi o popolari emergenti presenti sia nei Savi che negli Anziani.</li>
+                        <li style="margin-bottom: 0.5rem;"><strong>C3: Parenti dell'Elite (Consorterie)</strong>. Anziani che non siedono nei Savi, ma appartengono alle stesse casate/famiglie del Cerchio 2.</li>
+                        <li style="margin-bottom: 0.5rem;"><strong>C4: Uomini Nuovi Esterni</strong>. Membri del consiglio degli Anziani che non hanno alcun legame diretto o parentale con i Savi.</li>
+                    </ul>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                st.write("---")
+                
+                # 5. Top Families Rankings (2x2 Grid)
+                st.markdown('<div class="section-header">2. Egemonia Familiare per Cerchio (Top 10)</div>', unsafe_allow_html=True)
+                
+                def get_family_counts_for_names(names, source_df):
+                    df_sub = source_df[source_df['nome'].isin(names)].copy()
+                    counts = df_sub.drop_duplicates(subset=['nome'])['famiglia'].value_counts().reset_index()
+                    counts.columns = ['Famiglia', 'Numero Individui']
+                    return counts.head(10)
+                
+                stats_c0 = get_family_counts_for_names(c0, df_savi)
+                stats_c2 = get_family_counts_for_names(c2, df_anziani_unici)
+                stats_c3 = get_family_counts_for_names(c3, df_anziani_unici)
+                stats_c4 = get_family_counts_for_names(c4, df_anziani_unici)
+                
+                # Row 1: C0 and C2
+                col_f0, col_f2 = st.columns(2)
+                with col_f0:
+                    st.markdown("**Top Famiglie Aristocratiche (C0)**")
+                    if not stats_c0.empty:
+                        fig_f0 = px.bar(
+                            stats_c0, x='Numero Individui', y='Famiglia', orientation='h',
+                            color_discrete_sequence=['#94a3b8']
+                        )
+                        fig_f0.update_layout(yaxis={'categoryorder': 'total ascending'}, template="plotly_white", margin=dict(l=10, r=10, t=10, b=10), height=300)
+                        st.plotly_chart(fig_f0, width='stretch', config={'displayModeBar': False})
+                    else:
+                        st.write("Nessun dato.")
+                        
+                with col_f2:
+                    st.markdown("**Top Famiglie: Elite (C2)**")
+                    if not stats_c2.empty:
+                        fig_f2 = px.bar(
+                            stats_c2, x='Numero Individui', y='Famiglia', orientation='h',
+                            color_discrete_sequence=['#76D7C4']
+                        )
+                        fig_f2.update_layout(yaxis={'categoryorder': 'total ascending'}, template="plotly_white", margin=dict(l=10, r=10, t=10, b=10), height=300)
+                        st.plotly_chart(fig_f2, width='stretch', config={'displayModeBar': False})
+                    else:
+                        st.write("Nessun dato.")
+                
+                # Row 2: C3 and C4
+                col_f3, col_f4 = st.columns(2)
+                with col_f3:
+                    st.markdown("**Top Famiglie: Rete Consorterie (C3)**")
+                    if not stats_c3.empty:
+                        fig_f3 = px.bar(
+                            stats_c3, x='Numero Individui', y='Famiglia', orientation='h',
+                            color_discrete_sequence=['#F1948A']
+                        )
+                        fig_f3.update_layout(yaxis={'categoryorder': 'total ascending'}, template="plotly_white", margin=dict(l=10, r=10, t=10, b=10), height=300)
+                        st.plotly_chart(fig_f3, width='stretch', config={'displayModeBar': False})
+                    else:
+                        st.write("Nessun dato.")
+                        
+                with col_f4:
+                    st.markdown("**Top Famiglie: Nuovi Attori (C4)**")
+                    if not stats_c4.empty:
+                        fig_f4 = px.bar(
+                            stats_c4, x='Numero Individui', y='Famiglia', orientation='h',
+                            color_discrete_sequence=['#B0C4DE']
+                        )
+                        fig_f4.update_layout(yaxis={'categoryorder': 'total ascending'}, template="plotly_white", margin=dict(l=10, r=10, t=10, b=10), height=300)
+                        st.plotly_chart(fig_f4, width='stretch', config={'displayModeBar': False})
+                    else:
+                        st.write("Nessun dato.")
+                        
+                st.write("---")
+                
+                # 6. Interactive Circle Explorer & Export
+                st.markdown('<div class="section-header">3. Esplora i Membri dei Cerchi di Potere</div>', unsafe_allow_html=True)
+                selected_circle = st.selectbox(
+                    "Seleziona un cerchio da esplorare:",
+                    options=['C0: Aristocrazia (Solo Savi)', 'C1: Nobiltà Istituzionale (Entrambi)', 'C2: Elite (Entrambi)', 'C3: Rete Consorterie (Parenti C2)', 'C4: Nuovi Attori (Esterni)']
+                )
+                
+                circle_mapping = {
+                    'C0: Aristocrazia (Solo Savi)': (c0, df_savi, "C0_Aristocrazia"),
+                    'C1: Nobiltà Istituzionale (Entrambi)': (c1, df_savi, "C1_Nobilta_Istituzionale"),
+                    'C2: Elite (Entrambi)': (c2, df_anziani_unici, "C2_Elite"),
+                    'C3: Rete Consorterie (Parenti C2)': (c3, df_anziani_unici, "C3_Rete_Consorterie"),
+                    'C4: Nuovi Attori (Esterni)': (c4, df_anziani_unici, "C4_Uomini_Nuovi")
+                }
+                
+                names_in_circle, df_source, file_suffix = circle_mapping[selected_circle]
+                
+                # Filter rows in source df
+                df_members = df_source[df_source['nome'].isin(names_in_circle)].copy()
+                # Deduplicate members by name
+                df_members = df_members.drop_duplicates(subset=['nome'])
+                
+                if df_members.empty:
+                    st.info(f"Nessun individuo registrato nel {selected_circle}.")
+                else:
+                    # Select specific columns to show
+                    cols_to_show = ['nome', 'famiglia', 'quartiere']
+                    if 'Nobile' in df_members.columns:
+                        cols_to_show.append('Nobile')
+                    
+                    df_members_show = df_members[cols_to_show].reset_index(drop=True)
+                    df_members_show.columns = [c.capitalize() for c in cols_to_show]
+                    
+                    # Display count
+                    st.markdown(f"**Trovati {len(df_members_show)} individui unici**")
+                    st.dataframe(df_members_show, width='stretch', hide_index=True)
+                    
+                    # Download CSV
+                    csv_members = df_members_show.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label=f"Scarica elenco {selected_circle} come CSV",
+                        data=csv_members,
+                        file_name=f"elenco_{file_suffix.lower()}.csv",
+                        mime="text/csv"
+                    )
+                
+                st.write("---")
+                st.markdown("### 📥 Esporta Report Consiglio dei Savi")
+                savi_report_content = generate_markdown_report(start_yr, end_yr, filtered_time_df, 'savi')
+                st.download_button(
+                    label="Scarica Report Savi (.MD)",
+                    data=savi_report_content,
+                    file_name=f"report_savi_{start_yr}_{end_yr}.md",
+                    mime="text/markdown",
+                    key="download_report_md_savi"
+                )
+            except Exception as e:
+                st.error(f"Errore nel caricamento o elaborazione dei dati dei Savi: {e}")
+        else:
+            pass
 
     else: # download
+        if not df_fam_time.empty:
+            st.slider(
+                "Seleziona l'arco temporale per l'esportazione dei dati",
+                min_value=min_year,
+                max_value=max_year,
+                key="selected_years_download",
+                on_change=sync_years,
+                args=("selected_years_download",),
+                step=1
+            )
+        st.markdown("### Gestione Database & Esportazione Report")
+        subpage = st.radio("Seleziona l'azione", ["Download Report e Grafici", "Aggiorna Database (Upload Excel)"], horizontal=True, label_visibility="collapsed")
+        
+        if subpage == "Aggiorna Database (Upload Excel)":
+            st.markdown("### Aggiorna il database dei mandati (Excel)")
+            st.write(
+                "In questa sezione puoi caricare una nuova versione del file Excel per aggiornare il database dell'applicazione. "
+                "Il file caricato verrà verificato e standardizzato. Se la procedura va a buon fine, il file corrente "
+                "in `data/Anziani del Comune di Pisa 1344-1392.xlsx` verrà sovrascritto e tutte le schede verranno aggiornate automaticamente. "
+                "Per sicurezza, una copia di backup del file precedente verrà salvata con un timestamp."
+            )
+            
+            uploaded_file = st.file_uploader(
+                "Scegli un file Excel (.xlsx, .xls)",
+                type=["xlsx", "xls"],
+                help="Trascina o seleziona il file Excel dei mandati da importare.",
+                key="excel_db_uploader"
+            )
+            
+            if uploaded_file is not None:
+                upload_key = f"{uploaded_file.name}_{uploaded_file.size}"
+                if st.session_state.get("last_saved_upload") != upload_key:
+                    try:
+                        with st.spinner("Verifica e standardizzazione del file in corso..."):
+                            # Attempt to standardize the uploaded file in memory first
+                            std_df = robust_standardize_excel(uploaded_file)
+                            if std_df is None or std_df.empty:
+                                raise ValueError("Il file standardizzato risulta vuoto.")
+                            
+                            # Backup the current file if it exists
+                            import shutil
+                            from datetime import datetime
+                            if os.path.exists(DEFAULT_EXCEL_PATH):
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                backup_path = DEFAULT_EXCEL_PATH.replace(".xlsx", f"_backup_{timestamp}.xlsx")
+                                shutil.copy(DEFAULT_EXCEL_PATH, backup_path)
+                                
+                            # Overwrite the default file
+                            os.makedirs(os.path.dirname(DEFAULT_EXCEL_PATH), exist_ok=True)
+                            with open(DEFAULT_EXCEL_PATH, "wb") as f:
+                                f.write(uploaded_file.getbuffer())
+                                
+                            # Update session state
+                            st.session_state['standardized_df'] = std_df
+                            st.session_state['raw_file_name'] = uploaded_file.name
+                            xls_file = pd.ExcelFile(DEFAULT_EXCEL_PATH)
+                            from standardize import find_data_sheet
+                            st.session_state['sheet_used'] = find_data_sheet(xls_file)
+                            
+                            # Overwrite the total_df.csv file in data folder
+                            csv_target = os.path.join("data", "total_df.csv")
+                            std_df.to_csv(csv_target, index=False)
+                            
+                            # Also recompute Savi data in background or inline
+                            SAVI_EXCEL_PATH = os.path.join("data", "Lista di Savi e Cerchi di potere.xlsx")
+                            if os.path.exists(SAVI_EXCEL_PATH):
+                                precompute_and_save_savi_data(SAVI_EXCEL_PATH, csv_target)
+                            
+                            st.session_state['just_uploaded'] = True
+                            st.session_state['last_saved_upload'] = upload_key
+                            
+                        st.success("Database aggiornato con successo! Tutte le schede sono state ricalcolate.")
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"Errore durante l'aggiornamento (nessuna modifica apportata): {ex}")
+            else:
+                st.session_state['last_saved_upload'] = None
+                
+            st.markdown("---")
+            st.markdown("### Aggiorna il database dei Savi (Excel)")
+            st.write(
+                "In questa sezione puoi caricare una nuova versione del file Excel dei Savi per aggiornare la dashboard e ricalcolare i Cerchi di Potere. "
+                "Il file caricato verrà verificato. Se la procedura va a buon fine, il file corrente "
+                "in `data/Lista di Savi e Cerchi di potere.xlsx` verrà sovrascritto e i dati precalcolati verranno rigenerati automaticamente. "
+                "Per sicurezza, una copia di backup del file precedente verrà salvata con un timestamp."
+            )
+            
+            uploaded_savi_file = st.file_uploader(
+                "Scegli un file Excel dei Savi (.xlsx, .xls)",
+                type=["xlsx", "xls"],
+                help="Trascina o seleziona il file Excel dei Savi da importare.",
+                key="savi_db_uploader"
+            )
+            
+            if uploaded_savi_file is not None:
+                savi_upload_key = f"{uploaded_savi_file.name}_{uploaded_savi_file.size}"
+                if st.session_state.get("last_savi_upload") != savi_upload_key:
+                    try:
+                        with st.spinner("Elaborazione e standardizzazione del file dei Savi..."):
+                            # Dry run check
+                            test_df = clean_and_pivot_savi(uploaded_savi_file)
+                            if test_df.empty:
+                                raise ValueError("Il file Excel dei Savi non ha prodotto dati validi.")
+                            
+                            # Backup and write
+                            SAVI_EXCEL_PATH = os.path.join("data", "Lista di Savi e Cerchi di potere.xlsx")
+                            if os.path.exists(SAVI_EXCEL_PATH):
+                                import shutil
+                                from datetime import datetime
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                backup_path = SAVI_EXCEL_PATH.replace(".xlsx", f"_backup_{timestamp}.xlsx")
+                                shutil.copy(SAVI_EXCEL_PATH, backup_path)
+                                
+                            with open(SAVI_EXCEL_PATH, "wb") as f:
+                                f.write(uploaded_savi_file.getbuffer())
+                                
+                            # Recompute Savi data CSVs
+                            csv_target = os.path.join("data", "total_df.csv")
+                            if os.path.exists(csv_target):
+                                precompute_and_save_savi_data(SAVI_EXCEL_PATH, csv_target)
+                                
+                            st.session_state["last_savi_upload"] = savi_upload_key
+                            st.session_state['just_uploaded_savi'] = True
+                            
+                        st.success("Database dei Savi e Cerchi di Potere aggiornati con successo!")
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"Errore durante l'aggiornamento dei Savi (nessuna modifica apportata): {ex}")
+            else:
+                st.session_state["last_savi_upload"] = None
+            
+            st.stop()
+            
         preview_df = df.copy()
         
         # Rendering code for Generazione Report
